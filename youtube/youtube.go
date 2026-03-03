@@ -3,6 +3,7 @@ package youtube
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -40,12 +41,12 @@ func Search(query string, maxResults int) ([]Video, error) {
 	}
 
 	var videos []Video
-	lines := splitLines(string(output))
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		parts := splitPipe(line)
+		parts := strings.Split(line, "|")
 		if len(parts) >= 9 {
 			videos = append(videos, Video{
 				ID:          parts[0],
@@ -76,12 +77,12 @@ func GetVideoInfo(videoID string) (*Video, error) {
 		return nil, fmt.Errorf("yt-dlp error: %w", err)
 	}
 
-	lines := splitLines(string(output))
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		parts := splitPipe(line)
+		parts := strings.Split(line, "|")
 		if len(parts) >= 9 {
 			return &Video{
 				ID:          parts[0],
@@ -122,38 +123,6 @@ func GetStreamURL(videoURL string) (string, error) {
 
 func Trending() ([]Video, error) {
 	return Search("trending", 20)
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	current := ""
-	for _, r := range s {
-		if r == '\n' {
-			lines = append(lines, current)
-			current = ""
-		} else {
-			current += string(r)
-		}
-	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-	return lines
-}
-
-func splitPipe(s string) []string {
-	var parts []string
-	current := ""
-	for _, r := range s {
-		if r == '|' {
-			parts = append(parts, current)
-			current = ""
-		} else {
-			current += string(r)
-		}
-	}
-	parts = append(parts, current)
-	return parts
 }
 
 type HistoryItem struct {

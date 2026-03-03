@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"yt-tui/config"
 	"yt-tui/storage"
@@ -40,6 +41,12 @@ type Model struct {
 	searchInput   textinput.Model
 	playlists     []string
 	showPlaylists bool
+	showHelp      bool
+	width         int
+	height        int
+	scrollIdx     int
+	playerCmd     *exec.Cmd
+	isPaused      bool
 }
 
 func New(cfg *config.Config, store *storage.Storage) *Model {
@@ -68,12 +75,17 @@ func (m *Model) Init() tea.Cmd {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case searchResultMsg:
 		m.loading = false
 		m.videos = msg.videos
 		m.selectedIdx = 0
+		m.scrollIdx = 0
 		m.mode = "normal"
 		return m, nil
 	case playResultMsg:
@@ -83,28 +95,66 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.nowPlaying = msg.title
-		go m.runPlayer(msg.url, msg.title)
-		return m, nil
+		m.isPaused = false
+		return m, m.startPlayer(msg.url, msg.title)
 	}
 	return m, nil
 }
 
-func (m *Model) runPlayer(url, title string) {
-	cmd := exec.Command(m.cfg.Player, "--no-video", "--quiet", url)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.Start()
-	cmd.Wait()
+func (m *Model) startPlayer(url, title string) tea.Cmd {
+	if m.playerCmd != nil && m.playerCmd.Process != nil {
+		m.playerCmd.Process.Kill()
+	}
+
+	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", url)
+	err := m.playerCmd.Start()
+	if err != nil {
+		m.nowPlaying = "Error: " + err.Error()
+	}
 
 	video := youtube.Video{Title: title}
 	m.store.AddToHistory(video)
+
+	return nil
+}
+
+func (m *Model) stopPlayer() {
+	if m.playerCmd != nil && m.playerCmd.Process != nil {
+		m.playerCmd.Process.Kill()
+		m.playerCmd = nil
+		m.nowPlaying = ""
+		m.isPaused = false
+	}
+}
+
+func (m *Model) togglePause() {
+	if m.playerCmd != nil && m.playerCmd.Process != nil {
+		if m.isPaused {
+			m.playerCmd.Process.Signal(syscall.SIGCONT)
+			m.isPaused = false
+		} else {
+			m.playerCmd.Process.Signal(syscall.SIGSTOP)
+			m.isPaused = true
+		}
+	}
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.showHelp {
+		if msg.String() == "?" || msg.String() == "esc" || msg.String() == "q" {
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c", "esc":
+		m.stopPlayer()
 		return m, tea.Quit
-	case "esc":
+	case "?":
+		m.showHelp = true
+		return m, nil
+	case "q":
 		if m.showPlaylists {
 			m.showPlaylists = false
 			return m, nil
@@ -138,19 +188,29 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j", "down":
 		if m.selectedIdx < len(m.videos)-1 {
 			m.selectedIdx++
+			m.fixScroll()
 		}
 		return m, nil
 	case "k", "up":
 		if m.selectedIdx > 0 {
 			m.selectedIdx--
+			m.fixScroll()
 		}
+		return m, nil
+	case "p":
+		m.togglePause()
+		return m, nil
+	case "s":
+		m.stopPlayer()
 		return m, nil
 	case "g":
 		m.selectedIdx = 0
+		m.scrollIdx = 0
 		m.mode = "normal"
 		return m, nil
 	case "G":
 		m.selectedIdx = len(m.videos) - 1
+		m.fixScroll()
 		return m, nil
 	case "l", "enter", " ":
 		if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
@@ -159,8 +219,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingText = "Getting stream..."
 			return m, m.playVideo(video)
 		}
-	case "h", "p", "P":
+	case "h", "P":
 		m.showPlaylists = true
+		m.selectedIdx = 0
+		m.scrollIdx = 0
 		playlists, _ := m.store.ListPlaylists()
 		m.playlists = playlists
 		return m, nil
@@ -171,6 +233,29 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) fixScroll() {
+	itemHeight := 2
+	if m.showPlaylists {
+		itemHeight = 1
+	}
+
+	maxItems := (m.height - 15) / itemHeight
+	if maxItems < 1 {
+		maxItems = 1
+	}
+
+	if m.selectedIdx < m.scrollIdx {
+		m.scrollIdx = m.selectedIdx
+	}
+	if m.selectedIdx >= m.scrollIdx+maxItems {
+		m.scrollIdx = m.selectedIdx - maxItems + 1
+	}
+
+	if m.scrollIdx < 0 {
+		m.scrollIdx = 0
+	}
 }
 
 func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -191,7 +276,8 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				videos, _ := m.store.GetPlaylist(playlistName)
 				m.videos = videos
 				m.selectedIdx = 0
-		m.mode = "normal"
+				m.scrollIdx = 0
+				m.mode = "normal"
 				m.showPlaylists = false
 				m.view = "playlist"
 			}
@@ -199,20 +285,26 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j", "down":
 		if m.selectedIdx < len(m.playlists)+1 {
 			m.selectedIdx++
+			m.fixScroll()
 		}
 	case "k", "up":
 		if m.selectedIdx > 0 {
 			m.selectedIdx--
+			m.fixScroll()
 		}
-	case "h", "esc":
+	case "h", "q":
 		m.showPlaylists = false
 		m.selectedIdx = 0
+		m.scrollIdx = 0
 		m.mode = "normal"
 	}
 	return m, nil
 }
 
 func (m *Model) View() string {
+	if m.showHelp {
+		return m.helpView()
+	}
 	if m.showPlaylists {
 		return m.playlistsView()
 	}
@@ -249,6 +341,10 @@ func (m *Model) View() string {
 		BorderForeground(gray).
 		Padding(0, 1)
 
+	if m.width > 0 {
+		border = border.Width(m.width - 4)
+	}
+
 	content := border.Render(
 		lipgloss.JoinVertical(
 			lipgloss.Left,
@@ -259,7 +355,11 @@ func (m *Model) View() string {
 
 	var statusBar string
 	if m.nowPlaying != "" {
-		statusBar = lipgloss.NewStyle().Foreground(green).Render("▶ Playing: ") + normalStyle.Render(m.nowPlaying)
+		status := "▶ Playing: "
+		if m.isPaused {
+			status = "⏸ Paused: "
+		}
+		statusBar = lipgloss.NewStyle().Foreground(green).Render(status) + normalStyle.Render(m.nowPlaying)
 	} else if m.loading {
 		statusBar = statusStyle.Render("» " + m.loadingText)
 	} else {
@@ -267,7 +367,7 @@ func (m *Model) View() string {
 		if m.mode == "insert" {
 			modeStr = "-- INSERT --"
 		}
-		statusBar = normalStyle.Render(modeStr + " j/k: down/up  h: playlists  l/Enter/Space: play  i: search  Esc: close  q: quit")
+		statusBar = normalStyle.Render(modeStr + " j/k: navigate  p: pause  s: stop  ?: help  esc: quit")
 	}
 
 	return lipgloss.JoinVertical(
@@ -277,13 +377,47 @@ func (m *Model) View() string {
 	)
 }
 
+func (m *Model) helpView() string {
+	help := `
+  KEYBINDINGS
+  -----------
+  j/down:      Move down
+  k/up:        Move up
+  g:           Go to top
+  G:           Go to bottom
+  l/Enter/Spc: Play video
+  p:           Pause/Resume
+  s:           Stop current song
+  i/ /:        Search mode
+  h/P:         Playlists / History
+  ?:           Show/hide help
+  q:           Back / Normal mode
+  esc/Ctrl+C:  Quit
+`
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(cyan).
+		Padding(1).
+		Render(help)
+}
+
 func (m *Model) videoListView() string {
 	var lines []string
-	for i, v := range m.videos {
-		title := v.Title
-		if len(title) > 50 {
-			title = title[:47] + "..."
-		}
+
+	// Each video takes 2 lines
+	maxItems := (m.height - 15) / 2
+	if maxItems < 1 {
+		maxItems = 1
+	}
+
+	endIdx := m.scrollIdx + maxItems
+	if endIdx > len(m.videos) {
+		endIdx = len(m.videos)
+	}
+
+	for i := m.scrollIdx; i < endIdx; i++ {
+		v := m.videos[i]
+		title := truncate(v.Title, m.width-10)
 		desc := fmt.Sprintf("%s | %s", v.Duration, v.Channel)
 
 		if i == m.selectedIdx {
@@ -294,6 +428,11 @@ func (m *Model) videoListView() string {
 			lines = append(lines, secondaryStyle.Render("  "+desc))
 		}
 	}
+
+	if len(lines) == 0 {
+		return normalStyle.Render("No videos to display")
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
@@ -302,14 +441,20 @@ func (m *Model) detailsView() string {
 		return ""
 	}
 	v := m.videos[m.selectedIdx]
+
+	width := m.width - 10
+	if width < 10 {
+		width = 10
+	}
+
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n\n%s\n%s",
-		titleStyle.Render("Title:")+" "+normalStyle.Render(truncate(v.Title, 60)),
-		titleStyle.Render("Channel:")+" "+normalStyle.Render(v.Channel),
+		titleStyle.Render("Title:")+" "+normalStyle.Render(truncate(v.Title, width)),
+		titleStyle.Render("Channel:")+" "+normalStyle.Render(truncate(v.Channel, width)),
 		titleStyle.Render("Duration:")+" "+normalStyle.Render(v.Duration),
 		titleStyle.Render("Views:")+" "+normalStyle.Render(v.Views),
 		titleStyle.Render("Uploaded:")+" "+normalStyle.Render(v.Uploaded),
 		titleStyle.Render("Description:"),
-		secondaryStyle.Render(truncate(v.Description, 200)),
+		secondaryStyle.Render(truncate(v.Description, width*3)),
 	)
 }
 
@@ -323,7 +468,15 @@ func (m *Model) playlistsView() string {
 	items := []string{"View History", "Back"}
 	items = append(items, m.playlists...)
 
+	maxHeight := m.height - 10
+	if maxHeight < 1 {
+		maxHeight = 1
+	}
+
 	for i, p := range items {
+		if i < m.scrollIdx || i >= m.scrollIdx+maxHeight {
+			continue
+		}
 		if i == m.selectedIdx {
 			lines = append(lines, selectedStyle.Render("▶ "+p))
 		} else {
@@ -339,13 +492,18 @@ func (m *Model) playlistsView() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, secondaryStyle.Render("Esc/h: back  j/k: navigate  Enter: select"))
+	lines = append(lines, secondaryStyle.Render("q/h: back  j/k: navigate  Enter: select"))
 
-	return lipgloss.NewStyle().
+	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(gray).
-		Padding(1).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+		Padding(1)
+
+	if m.width > 0 {
+		style = style.Width(m.width - 4)
+	}
+
+	return style.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 func (m *Model) searchVideos(query string) tea.Cmd {
