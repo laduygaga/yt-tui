@@ -5,539 +5,405 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"yt-tui/config"
 	"yt-tui/storage"
 	"yt-tui/youtube"
 )
 
-type App struct {
-	app           *tview.Application
+var (
+	black  = lipgloss.Color("#000000")
+	cyan   = lipgloss.Color("#199aa6")
+	gray   = lipgloss.Color("#696c77")
+	green  = lipgloss.Color("#50a14f")
+	yellow = lipgloss.Color("#c18401")
+
+	normalStyle    = lipgloss.NewStyle().Foreground(black)
+	selectedStyle  = lipgloss.NewStyle().Foreground(black).Background(cyan)
+	secondaryStyle = lipgloss.NewStyle().Foreground(gray)
+	titleStyle     = lipgloss.NewStyle().Foreground(cyan).Bold(true)
+	statusStyle    = lipgloss.NewStyle().Foreground(gray)
+)
+
+type Model struct {
 	cfg           *config.Config
 	store         *storage.Storage
-	pages         *tview.Pages
-	searchBar     *tview.InputField
-	videoList     *tview.List
-	details       *tview.TextView
-	statusBar     *tview.TextView
-	playbackBar   *tview.TextView
-	currentVideos []youtube.Video
-	currentView   string
+	videos        []youtube.Video
+	selectedIdx   int
 	mode          string
-	focused       string
+	view          string
 	loading       bool
 	loadingText   string
 	nowPlaying    string
-	black         tcell.Color
-	yellow        tcell.Color
-	gray          tcell.Color
-	cyan          tcell.Color
-	green         tcell.Color
-	white         tcell.Color
+	searchInput   textinput.Model
+	playlists     []string
+	showPlaylists bool
 }
 
-func NewApp(cfg *config.Config, store *storage.Storage) *App {
-	app := tview.NewApplication()
-	pages := tview.NewPages()
+func New(cfg *config.Config, store *storage.Storage) *Model {
+	ti := textinput.New()
+	ti.Placeholder = "Search YouTube..."
+	ti.Prompt = "Search: "
+	ti.TextStyle = lipgloss.NewStyle().Foreground(black)
+	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(gray)
 
-	black := tcell.GetColor("#000000")
-	yellow := tcell.GetColor("#c18401")
-	gray := tcell.GetColor("#696c77")
-	cyan := tcell.GetColor("#199aa6")
-	green := tcell.GetColor("#50a14f")
-	white := tcell.GetColor("#696c77")
-
-	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
-	tview.Styles.ContrastBackgroundColor = tcell.ColorDefault
-	tview.Styles.MoreContrastBackgroundColor = tcell.ColorDefault
-	tview.Styles.PrimaryTextColor = black
-	tview.Styles.SecondaryTextColor = gray
-	tview.Styles.TertiaryTextColor = gray
-	tview.Styles.InverseTextColor = black
-
-	a := &App{
-		app:         app,
+	return &Model{
 		cfg:         cfg,
 		store:       store,
-		pages:       pages,
-		currentView: "search",
+		videos:      []youtube.Video{},
+		selectedIdx: 0,
 		mode:        "normal",
-		focused:     "list",
-		black:       black,
-		yellow:      yellow,
-		gray:        gray,
-		cyan:        cyan,
-		green:       green,
-		white:       white,
+		view:        "main",
+		loading:     false,
+		loadingText: "",
+		searchInput: ti,
 	}
-
-	a.setupUI()
-	return a
 }
 
-func (a *App) setupUI() {
-	searchBar := tview.NewForm().
-		AddInputField("Search: ", "", 40, nil, nil)
-	searchBar.SetBorder(false)
-	searchBar.SetBackgroundColor(tcell.ColorDefault)
+func (m *Model) Init() tea.Cmd {
+	return m.searchVideos("trending")
+}
 
-	searchBar.GetFormItem(0).(*tview.InputField).SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			query := searchBar.GetFormItem(0).(*tview.InputField).GetText()
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+	case searchResultMsg:
+		m.loading = false
+		m.videos = msg.videos
+		m.selectedIdx = 0
+		m.mode = "normal"
+		return m, nil
+	case playResultMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.nowPlaying = ""
+			return m, nil
+		}
+		m.nowPlaying = msg.title
+		go m.runPlayer(msg.url, msg.title)
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) runPlayer(url, title string) {
+	cmd := exec.Command(m.cfg.Player, "--no-video", "--quiet", url)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Start()
+	cmd.Wait()
+
+	video := youtube.Video{Title: title}
+	m.store.AddToHistory(video)
+}
+
+func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "esc":
+		if m.showPlaylists {
+			m.showPlaylists = false
+			return m, nil
+		}
+		if m.mode == "insert" {
+			m.mode = "normal"
+			m.searchInput.Blur()
+		}
+		return m, nil
+	}
+
+	if m.mode == "insert" {
+		var cmd tea.Cmd
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		if msg.Type == tea.KeyEnter {
+			query := m.searchInput.Value()
 			if query != "" {
-				a.currentView = "search"
-				a.DoSearch(query)
-				a.mode = "normal"
-				a.app.SetFocus(a.videoList)
-				a.updateStatusBar()
+				m.mode = "normal"
+				m.searchInput.Blur()
+				return m, m.searchVideos(query)
 			}
-		} else if key == tcell.KeyEscape {
-			a.mode = "normal"
-			a.app.SetFocus(a.videoList)
-			a.updateStatusBar()
 		}
-	})
-	a.searchBar = searchBar.GetFormItem(0).(*tview.InputField)
-	a.searchBar.SetBackgroundColor(tcell.ColorDefault)
-	a.searchBar.SetFieldBackgroundColor(tcell.ColorDefault)
-	a.searchBar.SetLabelColor(a.cyan)
+		return m, cmd
+	}
 
-	a.videoList = tview.NewList().
-		SetSelectedBackgroundColor(a.cyan).
-		SetSelectedTextColor(a.black)
-	a.videoList.SetBackgroundColor(tcell.ColorDefault)
-	a.videoList.SetMainTextColor(a.black)
-	a.videoList.SetSecondaryTextColor(a.gray)
+	switch msg.String() {
+	case "i", "/":
+		m.mode = "insert"
+		m.searchInput.Focus()
+		return m, nil
+	case "j", "down":
+		if m.selectedIdx < len(m.videos)-1 {
+			m.selectedIdx++
+		}
+		return m, nil
+	case "k", "up":
+		if m.selectedIdx > 0 {
+			m.selectedIdx--
+		}
+		return m, nil
+	case "g":
+		m.selectedIdx = 0
+		m.mode = "normal"
+		return m, nil
+	case "G":
+		m.selectedIdx = len(m.videos) - 1
+		return m, nil
+	case "l", "enter", " ":
+		if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
+			video := m.videos[m.selectedIdx]
+			m.loading = true
+			m.loadingText = "Getting stream..."
+			return m, m.playVideo(video)
+		}
+	case "h", "p", "P":
+		m.showPlaylists = true
+		playlists, _ := m.store.ListPlaylists()
+		m.playlists = playlists
+		return m, nil
+	}
 
-	a.details = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetTextColor(a.black)
-	a.details.SetBackgroundColor(tcell.ColorDefault)
-	a.details.SetTextColor(a.black)
+	if m.showPlaylists {
+		return m.handlePlaylistKey(msg)
+	}
 
-	a.statusBar = tview.NewTextView().
-		SetDynamicColors(true).
-		SetText("-- NORMAL -- j/k: down/up  h: back  l/Enter: play  i: search  P: playlists  q: quit")
-	a.statusBar.SetBackgroundColor(tcell.ColorDefault)
-	a.statusBar.SetTextColor(a.black)
-
-	a.playbackBar = tview.NewTextView().
-		SetDynamicColors(true).
-		SetText("")
-	a.playbackBar.SetBackgroundColor(tcell.ColorDefault)
-	a.playbackBar.SetTextColor(a.black)
-
-	searchPanel := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(a.searchBar, 1, 0, true).
-		AddItem(a.videoList, 0, 3, false).
-		AddItem(a.details, 0, 1, false)
-	searchPanel.SetBorder(true).SetTitle("YouTube TUI")
-	searchPanel.SetBackgroundColor(tcell.ColorDefault)
-
-	mainFlex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(searchPanel, 0, 4, true).
-		AddItem(a.playbackBar, 1, 0, false).
-		AddItem(a.statusBar, 1, 0, false)
-	mainFlex.SetBackgroundColor(tcell.ColorDefault)
-
-	a.pages.AddPage("main", mainFlex, true, true)
-
-	a.app.SetRoot(a.pages, true)
-	a.app.SetInputCapture(a.handleInput)
+	return m, nil
 }
 
-func (a *App) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	if event.Key() == tcell.KeyCtrlC || (event.Key() == tcell.KeyRune && event.Rune() == 'q') {
-		a.app.Stop()
-		return nil
-	}
-
-	if event.Key() == tcell.KeyEscape {
-		if a.pages.HasPage("playlists") {
-			a.pages.HidePage("playlists")
-			return nil
-		}
-		if a.pages.HasPage("addtoplaylist") {
-			a.pages.HidePage("addtoplaylist")
-			return nil
-		}
-		if a.pages.HasPage("create") {
-			a.pages.HidePage("create")
-			return nil
-		}
-		a.mode = "normal"
-		a.app.SetFocus(a.videoList)
-		a.updateStatusBar()
-		return nil
-	}
-
-	if a.mode == "insert" {
-		if event.Key() == tcell.KeyEscape {
-			a.mode = "normal"
-			a.app.SetFocus(a.videoList)
-			a.updateStatusBar()
-			return nil
-		}
-		return event
-	}
-
-	if event.Key() == tcell.KeyRune {
-		r := event.Rune()
-		if r == 'i' || r == '/' {
-			a.mode = "insert"
-			a.app.SetFocus(a.searchBar)
-			a.updateStatusBar()
-			return nil
-		}
-
-		if r == 'j' {
-			a.videoList.SetCurrentItem(a.videoList.GetCurrentItem() + 1)
-			if a.videoList.GetCurrentItem() < len(a.currentVideos) {
-				a.showVideoDetails(a.currentVideos[a.videoList.GetCurrentItem()])
+func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		if m.selectedIdx < len(m.playlists)+2 {
+			if m.selectedIdx == 0 {
+				m.view = "history"
+				m.showPlaylists = false
+				return m, m.loadHistory()
+			} else if m.selectedIdx == 1 {
+				m.showPlaylists = false
+				return m, nil
 			}
-			return nil
-		}
-		if r == 'k' {
-			a.videoList.SetCurrentItem(a.videoList.GetCurrentItem() - 1)
-			if a.videoList.GetCurrentItem() < len(a.currentVideos) {
-				a.showVideoDetails(a.currentVideos[a.videoList.GetCurrentItem()])
+			idx := m.selectedIdx - 2
+			if idx < len(m.playlists) {
+				playlistName := m.playlists[idx]
+				videos, _ := m.store.GetPlaylist(playlistName)
+				m.videos = videos
+				m.selectedIdx = 0
+		m.mode = "normal"
+				m.showPlaylists = false
+				m.view = "playlist"
 			}
-			return nil
 		}
-		if r == 'h' {
-			if a.currentView == "playlist" {
-				a.showPlaylists()
-			} else {
-				a.showPlaylists()
-			}
-			return nil
+	case "j", "down":
+		if m.selectedIdx < len(m.playlists)+1 {
+			m.selectedIdx++
 		}
-		if r == 'l' || r == 'L' || r == ' ' {
-			idx := a.videoList.GetCurrentItem()
-			if idx >= 0 && idx < len(a.currentVideos) {
-				a.playVideo(a.currentVideos[idx])
-			}
-			return nil
+	case "k", "up":
+		if m.selectedIdx > 0 {
+			m.selectedIdx--
 		}
-		if r == 'p' || r == 'P' {
-			a.showPlaylists()
-			return nil
-		}
-		if r == 'r' || r == 'R' {
-			if a.currentView == "history" {
-				a.showHistory()
-			}
-			return nil
-		}
-		if r == 'G' {
-			a.videoList.SetCurrentItem(len(a.currentVideos) - 1)
-			if a.videoList.GetCurrentItem() < len(a.currentVideos) {
-				a.showVideoDetails(a.currentVideos[a.videoList.GetCurrentItem()])
-			}
-			return nil
-		}
-		if r == 'g' {
-			return event
-		}
+	case "h", "esc":
+		m.showPlaylists = false
+		m.selectedIdx = 0
+		m.mode = "normal"
 	}
-
-	if event.Key() == tcell.KeyDown || event.Key() == tcell.KeyCtrlN {
-		a.videoList.SetCurrentItem(a.videoList.GetCurrentItem() + 1)
-		if a.videoList.GetCurrentItem() < len(a.currentVideos) {
-			a.showVideoDetails(a.currentVideos[a.videoList.GetCurrentItem()])
-		}
-		return nil
-	}
-	if event.Key() == tcell.KeyUp || event.Key() == tcell.KeyCtrlP {
-		a.videoList.SetCurrentItem(a.videoList.GetCurrentItem() - 1)
-		if a.videoList.GetCurrentItem() < len(a.currentVideos) {
-			a.showVideoDetails(a.currentVideos[a.videoList.GetCurrentItem()])
-		}
-		return nil
-	}
-	if event.Key() == tcell.KeyEnter {
-		idx := a.videoList.GetCurrentItem()
-		if idx >= 0 && idx < len(a.currentVideos) {
-			a.playVideo(a.currentVideos[idx])
-		}
-		return nil
-	}
-
-	return event
+	return m, nil
 }
 
-func (a *App) updateStatusBar() {
-	var base string
-	if a.mode == "insert" {
-		base = "-- INSERT -- Type search, Enter to search, Esc to exit"
+func (m *Model) View() string {
+	if m.showPlaylists {
+		return m.playlistsView()
+	}
+
+	var mainContent string
+
+	if m.mode == "insert" {
+		mainContent = m.searchInput.View()
+		if len(m.videos) > 0 {
+			mainContent = lipgloss.JoinVertical(
+				lipgloss.Left,
+				mainContent,
+				m.videoListView(),
+			)
+		}
+	} else if m.loading {
+		mainContent = statusStyle.Render("» " + m.loadingText)
+	} else if len(m.videos) == 0 {
+		mainContent = normalStyle.Render("No videos found")
 	} else {
-		base = "-- NORMAL -- j/k: down/up  h: playlists  l/Space/Enter: play  i: search  P: history  g: top  G: bottom  q: quit"
+		mainContent = m.videoListView()
 	}
-	if a.loading {
-		a.statusBar.SetText(base + " » " + a.loadingText)
-	} else {
-		a.statusBar.SetText(base)
-	}
-}
 
-func (a *App) setLoading(loading bool, text string) {
-	a.loading = loading
-	a.loadingText = text
-	a.updateStatusBar()
-}
+	details := m.detailsView()
 
-func (a *App) DoSearch(query string) {
-	a.setLoading(true, "Searching "+query+"...")
-
-	go func() {
-		videos, err := youtube.Search(query, a.cfg.MaxResults)
-		a.app.QueueUpdate(func() {
-			defer a.setLoading(false, "")
-			if err != nil {
-				a.statusBar.SetText(fmt.Sprintf("Error: %s", err.Error()))
-				return
-			}
-
-			a.currentVideos = videos
-			a.videoList.Clear()
-
-			for _, v := range videos {
-				title := v.Title
-				if len(title) > 50 {
-					title = title[:50] + "..."
-				}
-				desc := fmt.Sprintf("[%s] %s", v.Duration, v.Channel)
-				a.videoList.AddItem(title, desc, 0, nil)
-			}
-
-			a.updateStatusBar()
-
-			if len(videos) > 0 {
-				a.showVideoDetails(videos[0])
-			}
-
-			a.videoList.SetSelectedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
-				if index < len(a.currentVideos) {
-					a.showVideoDetails(a.currentVideos[index])
-				}
-			})
-		})
-	}()
-}
-
-func (a *App) showVideoDetails(video youtube.Video) {
-	details := fmt.Sprintf(`[cyan]Title:[] %s
-[cyan]Channel:[] %s
-[cyan]Duration:[] %s
-[cyan]Views:[] %s
-[cyan]Uploaded:[] %s
-
-[cyan]Description:[]
-%s`,
-		video.Title,
-		video.Channel,
-		video.Duration,
-		video.Views,
-		video.Uploaded,
-		video.Description,
+	layout := lipgloss.JoinVertical(
+		lipgloss.Left,
+		mainContent,
+		details,
 	)
-	a.details.SetText(details)
-}
 
-func (a *App) playVideo(video youtube.Video) {
-	a.setLoading(true, "Getting stream for "+video.Title+"...")
-	a.nowPlaying = video.Title
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(gray).
+		Padding(0, 1)
 
-	go func() {
-		url, err := youtube.GetStreamURL(video.URL)
-		if err != nil {
-			a.app.QueueUpdate(func() {
-				defer a.setLoading(false, "")
-				a.playbackBar.SetText(fmt.Sprintf("Error: %s", err.Error()))
-			})
-			return
+	content := border.Render(
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			titleStyle.Render("YouTube TUI"),
+			layout,
+		),
+	)
+
+	var statusBar string
+	if m.nowPlaying != "" {
+		statusBar = lipgloss.NewStyle().Foreground(green).Render("▶ Playing: ") + normalStyle.Render(m.nowPlaying)
+	} else if m.loading {
+		statusBar = statusStyle.Render("» " + m.loadingText)
+	} else {
+		modeStr := "-- NORMAL --"
+		if m.mode == "insert" {
+			modeStr = "-- INSERT --"
 		}
+		statusBar = normalStyle.Render(modeStr + " j/k: down/up  h: playlists  l/Enter/Space: play  i: search  Esc: close  q: quit")
+	}
 
-		a.app.QueueUpdate(func() {
-			defer a.setLoading(false, "")
-			a.playbackBar.SetTextColor(a.black)
-			a.playbackBar.SetText(fmt.Sprintf("▶ Playing: %s", video.Title))
-		})
-
-		url = strings.TrimSpace(url)
-
-		cmd := exec.Command(a.cfg.Player, "--no-video", "--quiet", url)
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		cmd.Start()
-		cmd.Wait()
-
-		a.store.AddToHistory(video)
-
-		a.app.QueueUpdate(func() {
-			a.playbackBar.SetText("")
-			a.nowPlaying = ""
-			a.updateStatusBar()
-		})
-	}()
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		content,
+		statusBar,
+	)
 }
 
-func (a *App) showPlaylists() {
-	playlists, err := a.store.ListPlaylists()
-	if err != nil {
-		playlists = []string{}
-	}
-
-	buttons := []string{"Back", "View History"}
-	for _, p := range playlists {
-		buttons = append(buttons, p)
-	}
-
-	modal := tview.NewModal().
-		SetText("Playlists\n\nSelect a playlist:").
-		AddButtons(buttons).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			a.pages.HidePage("playlists")
-			if buttonLabel == "View History" {
-				a.showHistory()
-			} else if buttonLabel != "Back" && buttonLabel != "" {
-				a.showPlaylistVideos(buttonLabel)
-			}
-		})
-
-	a.pages.AddPage("playlists", modal, false, true)
-	a.pages.ShowPage("playlists")
-}
-
-func (a *App) showPlaylistVideos(name string) {
-	videos, err := a.store.GetPlaylist(name)
-	if err != nil || len(videos) == 0 {
-		a.statusBar.SetText("Empty playlist")
-		return
-	}
-
-	a.currentView = "playlist"
-	a.currentVideos = videos
-	a.videoList.Clear()
-
-	for _, v := range videos {
+func (m *Model) videoListView() string {
+	var lines []string
+	for i, v := range m.videos {
 		title := v.Title
 		if len(title) > 50 {
-			title = title[:50] + "..."
+			title = title[:47] + "..."
 		}
-		desc := fmt.Sprintf("[%s] %s", v.Duration, v.Channel)
-		a.videoList.AddItem(title, desc, 0, nil)
+		desc := fmt.Sprintf("%s | %s", v.Duration, v.Channel)
+
+		if i == m.selectedIdx {
+			lines = append(lines, selectedStyle.Render("▶ "+title))
+			lines = append(lines, selectedStyle.Render("  "+desc))
+		} else {
+			lines = append(lines, normalStyle.Render("  "+title))
+			lines = append(lines, secondaryStyle.Render("  "+desc))
+		}
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+}
+
+func (m *Model) detailsView() string {
+	if len(m.videos) == 0 || m.selectedIdx >= len(m.videos) {
+		return ""
+	}
+	v := m.videos[m.selectedIdx]
+	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n\n%s\n%s",
+		titleStyle.Render("Title:")+" "+normalStyle.Render(truncate(v.Title, 60)),
+		titleStyle.Render("Channel:")+" "+normalStyle.Render(v.Channel),
+		titleStyle.Render("Duration:")+" "+normalStyle.Render(v.Duration),
+		titleStyle.Render("Views:")+" "+normalStyle.Render(v.Views),
+		titleStyle.Render("Uploaded:")+" "+normalStyle.Render(v.Uploaded),
+		titleStyle.Render("Description:"),
+		secondaryStyle.Render(truncate(v.Description, 200)),
+	)
+}
+
+func (m *Model) playlistsView() string {
+	var lines []string
+	lines = append(lines, titleStyle.Render("Playlists"))
+	lines = append(lines, "")
+	lines = append(lines, secondaryStyle.Render("Select a playlist:"))
+	lines = append(lines, "")
+
+	items := []string{"View History", "Back"}
+	items = append(items, m.playlists...)
+
+	for i, p := range items {
+		if i == m.selectedIdx {
+			lines = append(lines, selectedStyle.Render("▶ "+p))
+		} else {
+			lines = append(lines, normalStyle.Render("  "+p))
+		}
+		if i >= 2 {
+			idx := i - 2
+			if idx < len(m.playlists) {
+				videos, _ := m.store.GetPlaylist(m.playlists[idx])
+				lines = append(lines, secondaryStyle.Render(fmt.Sprintf("    %d videos", len(videos))))
+			}
+		}
 	}
 
-	a.statusBar.SetText("Enter[] play  Esc[] back")
+	lines = append(lines, "")
+	lines = append(lines, secondaryStyle.Render("Esc/h: back  j/k: navigate  Enter: select"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(gray).
+		Padding(1).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
-func (a *App) showAddToPlaylistDialog(video youtube.Video) {
-	playlists, _ := a.store.ListPlaylists()
-
-	if len(playlists) == 0 {
-		buttons := []string{"Cancel", "Create New"}
-		modal := tview.NewModal().
-			SetText(fmt.Sprintf("Add to playlist: %s\n\nNo playlists yet", video.Title)).
-			AddButtons(buttons).
-			SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-				a.pages.HidePage("addtoplaylist")
-				if buttonLabel == "Create New" {
-					a.showCreatePlaylistDialog(video)
-				}
-			})
-		a.pages.AddPage("addtoplaylist", modal, false, true)
-		a.pages.ShowPage("addtoplaylist")
-		return
+func (m *Model) searchVideos(query string) tea.Cmd {
+	m.loading = true
+	m.loadingText = "Searching " + query + "..."
+	return func() tea.Msg {
+		videos, err := youtube.Search(query, m.cfg.MaxResults)
+		return searchResultMsg{videos: videos, err: err}
 	}
+}
 
-	buttons := []string{"Cancel"}
-	for _, p := range playlists {
-		buttons = append(buttons, p)
+func (m *Model) playVideo(video youtube.Video) tea.Cmd {
+	return func() tea.Msg {
+		url, err := youtube.GetStreamURL(video.URL)
+		if err != nil {
+			return playResultMsg{url: "", title: video.Title, err: err}
+		}
+		url = strings.TrimSpace(url)
+		return playResultMsg{url: url, title: video.Title, err: nil}
 	}
-	buttons = append(buttons, "Create New")
-
-	modal := tview.NewModal().
-		SetText(fmt.Sprintf("Add to playlist: %s", video.Title)).
-		AddButtons(buttons).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			a.pages.HidePage("addtoplaylist")
-			if buttonLabel == "Create New" {
-				a.showCreatePlaylistDialog(video)
-			} else if buttonLabel != "Cancel" && buttonLabel != "" {
-				a.store.AddToPlaylist(buttonLabel, video)
-				a.statusBar.SetText(fmt.Sprintf("Added to %s", buttonLabel))
-			}
-		})
-
-	a.pages.AddPage("addtoplaylist", modal, false, true)
-	a.pages.ShowPage("addtoplaylist")
 }
 
-func (a *App) showCreatePlaylistDialog(video youtube.Video) {
-	form := tview.NewForm().
-		AddInputField("Playlist name", "", 30, nil, nil)
-	form.SetBorder(true).SetTitle("Create Playlist")
-
-	inputField := form.GetFormItem(0).(*tview.InputField)
-
-	modal := tview.NewModal().
-		SetText("Enter playlist name:").
-		AddButtons([]string{"Cancel", "Create"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			a.pages.HidePage("create")
-			if buttonLabel == "Create" {
-				name := inputField.GetText()
-				if name != "" {
-					a.store.CreatePlaylist(name)
-					a.store.AddToPlaylist(name, video)
-					a.statusBar.SetText(fmt.Sprintf("Created and added to %s", name))
-				}
-			}
-		})
-
-	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(form, 3, 0, true).
-		AddItem(modal, 3, 0, false)
-
-	a.pages.AddPage("create", flex, false, true)
-	a.pages.ShowPage("create")
+func (m *Model) loadHistory() tea.Cmd {
+	return func() tea.Msg {
+		history, err := m.store.GetHistory()
+		if err != nil || len(history) == 0 {
+			return searchResultMsg{videos: []youtube.Video{}, err: nil}
+		}
+		var videos []youtube.Video
+		for _, h := range history {
+			videos = append(videos, h.Video)
+		}
+		return searchResultMsg{videos: videos, err: nil}
+	}
 }
 
-func (a *App) showHistory() {
-	a.setLoading(true, "Loading history...")
-
-	go func() {
-		history, err := a.store.GetHistory()
-		a.app.QueueUpdate(func() {
-			defer a.setLoading(false, "")
-			if err != nil || len(history) == 0 {
-				a.statusBar.SetText("No history yet.")
-				return
-			}
-
-			a.currentView = "history"
-			a.videoList.Clear()
-			a.currentVideos = []youtube.Video{}
-
-			for _, h := range history {
-				a.currentVideos = append(a.currentVideos, h.Video)
-				title := h.Video.Title
-				if len(title) > 50 {
-					title = title[:50] + "..."
-				}
-				desc := fmt.Sprintf("[%s] %s", h.Video.Duration, h.Video.Channel)
-				a.videoList.AddItem(title, desc, 0, nil)
-			}
-
-			a.statusBar.SetText("R[] refresh  Enter[] play")
-			a.updateStatusBar()
-		})
-	}()
+type searchResultMsg struct {
+	videos []youtube.Video
+	err    error
 }
 
-func (a *App) Run() error {
-	return a.app.Run()
+type playResultMsg struct {
+	url   string
+	title string
+	err   error
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func Run(cfg *config.Config, store *storage.Storage) error {
+	p := tea.NewProgram(New(cfg, store), tea.WithOutput(nil))
+	if _, err := p.Run(); err != nil {
+		return err
+	}
+	return nil
 }

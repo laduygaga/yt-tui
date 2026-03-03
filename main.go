@@ -13,13 +13,7 @@ func main() {
 	cfg := config.Load()
 	store := storage.New(cfg)
 
-	app := ui.NewApp(cfg, store)
-
-	go func() {
-		app.DoSearch("trending")
-	}()
-
-	if err := app.Run(); err != nil {
+	if err := ui.Run(cfg, store); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running app: %v\n", err)
 		os.Exit(1)
 	}

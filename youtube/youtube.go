@@ -103,7 +103,7 @@ func GetVideoInfo(videoID string) (*Video, error) {
 func GetStreamURL(videoURL string) (string, error) {
 	args := []string{
 		"--no-check-certificate",
-		"-f", "bestaudio",
+		"-f", "bestaudio/best",
 		"-g",
 		"--", videoURL,
 	}
