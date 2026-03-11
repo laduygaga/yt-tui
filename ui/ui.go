@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
+	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -47,6 +48,21 @@ type Model struct {
 	scrollIdx     int
 	playerCmd     *exec.Cmd
 	isPaused      bool
+	progress      progress.Model
+	currentTime   float64
+	totalTime     float64
+}
+
+type progressMsg float64
+
+func (m *Model) tickProgress() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		if m.playerCmd == nil || m.playerCmd.Process == nil || m.isPaused {
+			return nil
+		}
+
+		return progressMsg(1.0)
+	})
 }
 
 func New(cfg *config.Config, store *storage.Storage) *Model {
@@ -66,6 +82,7 @@ func New(cfg *config.Config, store *storage.Storage) *Model {
 		loading:     false,
 		loadingText: "",
 		searchInput: ti,
+		progress:    progress.New(progress.WithDefaultGradient()),
 	}
 }
 
@@ -96,9 +113,60 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.nowPlaying = msg.title
 		m.isPaused = false
-		return m, m.startPlayer(msg.url, msg.title)
+		m.currentTime = 0
+		m.totalTime = parseDuration(msg.duration)
+		return m, tea.Batch(m.startPlayer(msg.url, msg.title), m.tickProgress())
+	case progressMsg:
+		if m.playerCmd != nil && m.playerCmd.Process != nil && !m.isPaused {
+			m.currentTime += float64(msg)
+			if m.currentTime > m.totalTime {
+				m.currentTime = m.totalTime
+			}
+			return m, m.tickProgress()
+		}
+		return m, nil
+	case progress.FrameMsg:
+		progressModel, cmd := m.progress.Update(msg)
+		m.progress = progressModel.(progress.Model)
+		return m, cmd
 	}
 	return m, nil
+}
+
+func formatTime(seconds float64) string {
+	s := int(seconds)
+	h := s / 3600
+	m := (s % 3600) / 60
+	s = s % 60
+	if h > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+func parseDuration(duration string) float64 {
+	duration = strings.TrimSpace(duration)
+	if duration == "" {
+		return 0
+	}
+	parts := strings.Split(duration, ":")
+	var seconds float64
+	for i, part := range parts {
+		var val int
+		_, err := fmt.Sscanf(part, "%d", &val)
+		if err != nil {
+			continue
+		}
+		multiplier := 1.0
+		pos := len(parts) - 1 - i
+		if pos == 1 {
+			multiplier = 60.0
+		} else if pos == 2 {
+			multiplier = 3600.0
+		}
+		seconds += float64(val) * multiplier
+	}
+	return seconds
 }
 
 func (m *Model) startPlayer(url, title string) tea.Cmd {
@@ -106,7 +174,7 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 		m.playerCmd.Process.Kill()
 	}
 
-	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", url)
+	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", "--input-ipc-server=/tmp/yt-tui-mpv.sock", url)
 	err := m.playerCmd.Start()
 	if err != nil {
 		m.nowPlaying = "Error: " + err.Error()
@@ -128,15 +196,20 @@ func (m *Model) stopPlayer() {
 }
 
 func (m *Model) togglePause() {
-	if m.playerCmd != nil && m.playerCmd.Process != nil {
-		if m.isPaused {
-			m.playerCmd.Process.Signal(syscall.SIGCONT)
-			m.isPaused = false
-		} else {
-			m.playerCmd.Process.Signal(syscall.SIGSTOP)
-			m.isPaused = true
-		}
+	if m.playerCmd == nil || m.playerCmd.Process == nil {
+		return
 	}
+
+	m.isPaused = !m.isPaused
+	pauseVal := "false"
+	if m.isPaused {
+		pauseVal = "true"
+	}
+
+	go func() {
+		cmdStr := fmt.Sprintf(`{"command":["set_property","pause",%s]}`, pauseVal)
+		exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U /tmp/yt-tui-mpv.sock", cmdStr)).Run()
+	}()
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -359,7 +432,18 @@ func (m *Model) View() string {
 		if m.isPaused {
 			status = "⏸ Paused: "
 		}
-		statusBar = lipgloss.NewStyle().Foreground(green).Render(status) + normalStyle.Render(m.nowPlaying)
+
+		var progressStr string
+		if m.totalTime > 0 {
+			pct := m.currentTime / m.totalTime
+			m.progress.Width = m.width - 20
+			if m.progress.Width < 20 {
+				m.progress.Width = 20
+			}
+			progressStr = "\n" + m.progress.ViewAs(pct) + fmt.Sprintf(" %s / %s", formatTime(m.currentTime), formatTime(m.totalTime))
+		}
+
+		statusBar = lipgloss.NewStyle().Foreground(green).Render(status) + normalStyle.Render(m.nowPlaying) + progressStr
 	} else if m.loading {
 		statusBar = statusStyle.Render("» " + m.loadingText)
 	} else {
@@ -519,10 +603,10 @@ func (m *Model) playVideo(video youtube.Video) tea.Cmd {
 	return func() tea.Msg {
 		url, err := youtube.GetStreamURL(video.URL)
 		if err != nil {
-			return playResultMsg{url: "", title: video.Title, err: err}
+			return playResultMsg{url: "", title: video.Title, duration: video.Duration, err: err}
 		}
 		url = strings.TrimSpace(url)
-		return playResultMsg{url: url, title: video.Title, err: nil}
+		return playResultMsg{url: url, title: video.Title, duration: video.Duration, err: nil}
 	}
 }
 
@@ -546,9 +630,10 @@ type searchResultMsg struct {
 }
 
 type playResultMsg struct {
-	url   string
-	title string
-	err   error
+	url      string
+	title    string
+	duration string
+	err      error
 }
 
 func truncate(s string, maxLen int) string {
