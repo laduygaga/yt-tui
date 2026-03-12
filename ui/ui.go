@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -51,9 +52,11 @@ type Model struct {
 	progress      progress.Model
 	currentTime   float64
 	totalTime     float64
+	program       *tea.Program
 }
 
 type progressMsg float64
+type syncTimeMsg float64
 
 func (m *Model) tickProgress() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
@@ -98,6 +101,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case syncTimeMsg:
+		m.currentTime = float64(msg)
+		if m.currentTime > m.totalTime {
+			m.currentTime = m.totalTime
+		}
+		return m, nil
 	case searchResultMsg:
 		m.loading = false
 		m.videos = msg.videos
@@ -174,7 +183,8 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 		m.playerCmd.Process.Kill()
 	}
 
-	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", "--input-ipc-server=/tmp/yt-tui-mpv.sock", url)
+	socketPath := "/tmp/yt-tui-mpv.sock"
+	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 	err := m.playerCmd.Start()
 	if err != nil {
 		m.nowPlaying = "Error: " + err.Error()
@@ -182,6 +192,31 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 
 	video := youtube.Video{Title: title}
 	m.store.AddToHistory(video)
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		for {
+			if m.playerCmd == nil || m.playerCmd.Process == nil || m.isPaused {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			cmdStr := `{"command":["get_property","time-pos"]}`
+			out, err := exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U %s", cmdStr, socketPath)).Output()
+			if err == nil {
+				var resp struct {
+					Data  float64 `json:"data"`
+					Error string  `json:"error"`
+				}
+				if jsonErr := json.Unmarshal(out, &resp); jsonErr == nil && resp.Error == "success" {
+					if m.program != nil {
+						m.program.Send(syncTimeMsg(resp.Data))
+					}
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}()
 
 	return nil
 }
@@ -208,6 +243,25 @@ func (m *Model) togglePause() {
 
 	go func() {
 		cmdStr := fmt.Sprintf(`{"command":["set_property","pause",%s]}`, pauseVal)
+		exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U /tmp/yt-tui-mpv.sock", cmdStr)).Run()
+	}()
+}
+
+func (m *Model) seek(seconds float64) {
+	if m.playerCmd == nil || m.playerCmd.Process == nil {
+		return
+	}
+
+	m.currentTime += seconds
+	if m.currentTime < 0 {
+		m.currentTime = 0
+	}
+	if m.currentTime > m.totalTime {
+		m.currentTime = m.totalTime
+	}
+
+	go func() {
+		cmdStr := fmt.Sprintf(`{"command":["seek",%f,"relative"]}`, seconds)
 		exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U /tmp/yt-tui-mpv.sock", cmdStr)).Run()
 	}()
 }
@@ -273,6 +327,21 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		m.togglePause()
 		return m, nil
+	case "h":
+		if m.nowPlaying != "" {
+			m.seek(-10)
+		}
+		return m, nil
+	case "l":
+		if m.nowPlaying != "" {
+			m.seek(10)
+		} else if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
+			video := m.videos[m.selectedIdx]
+			m.loading = true
+			m.loadingText = "Getting stream..."
+			return m, m.playVideo(video)
+		}
+		return m, nil
 	case "s":
 		m.stopPlayer()
 		return m, nil
@@ -285,14 +354,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selectedIdx = len(m.videos) - 1
 		m.fixScroll()
 		return m, nil
-	case "l", "enter", " ":
+	case "enter", " ":
 		if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
 			video := m.videos[m.selectedIdx]
 			m.loading = true
 			m.loadingText = "Getting stream..."
 			return m, m.playVideo(video)
 		}
-	case "h", "P":
+	case "H", "P":
 		m.showPlaylists = true
 		m.selectedIdx = 0
 		m.scrollIdx = 0
@@ -451,7 +520,7 @@ func (m *Model) View() string {
 		if m.mode == "insert" {
 			modeStr = "-- INSERT --"
 		}
-		statusBar = normalStyle.Render(modeStr + " j/k: navigate  p: pause  s: stop  ?: help  esc: quit")
+		statusBar = normalStyle.Render(modeStr + " j/k: navigate  h/l: seek  p: pause  s: stop  ?: help  esc: quit")
 	}
 
 	return lipgloss.JoinVertical(
@@ -465,15 +534,16 @@ func (m *Model) helpView() string {
 	help := `
   KEYBINDINGS
   -----------
+  h/l:         Seek backward/forward 10s
   j/down:      Move down
   k/up:        Move up
   g:           Go to top
   G:           Go to bottom
-  l/Enter/Spc: Play video
+  Enter/Spc:   Play video
   p:           Pause/Resume
   s:           Stop current song
   i/ /:        Search mode
-  h/P:         Playlists / History
+  H/P:         Playlists / History
   ?:           Show/hide help
   q:           Back / Normal mode
   esc/Ctrl+C:  Quit
@@ -644,7 +714,9 @@ func truncate(s string, maxLen int) string {
 }
 
 func Run(cfg *config.Config, store *storage.Storage) error {
-	p := tea.NewProgram(New(cfg, store), tea.WithOutput(nil))
+	m := New(cfg, store)
+	p := tea.NewProgram(m, tea.WithOutput(nil))
+	m.program = p
 	if _, err := p.Run(); err != nil {
 		return err
 	}
