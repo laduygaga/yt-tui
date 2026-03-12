@@ -53,13 +53,23 @@ func (s *Storage) AddToHistory(video youtube.Video) error {
 		history = []HistoryItem{}
 	}
 
-	history = append([]HistoryItem{{Video: video, WatchedAt: time.Now()}}, history...)
+	var newHistory []HistoryItem
+	newHistory = append(newHistory, HistoryItem{Video: video, WatchedAt: time.Now()})
 
-	if len(history) > 100 {
-		history = history[:100]
+	for _, item := range history {
+		isDuplicate := (item.Video.ID != "" && item.Video.ID == video.ID) ||
+			(item.Video.URL != "" && item.Video.URL == video.URL)
+		if isDuplicate {
+			continue
+		}
+		newHistory = append(newHistory, item)
 	}
 
-	data, err := json.MarshalIndent(history, "", "  ")
+	if len(newHistory) > 100 {
+		newHistory = newHistory[:100]
+	}
+
+	data, err := json.MarshalIndent(newHistory, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -72,12 +82,14 @@ func (s *Storage) GetHistory() ([]HistoryItem, error) {
 
 	data, err := os.ReadFile(s.historyFile)
 	if err != nil {
-		return nil, err
+		absPath, _ := filepath.Abs(s.historyFile)
+		return nil, fmt.Errorf("failed to read history file at %s: %w", absPath, err)
 	}
 
 	var history []HistoryItem
 	if err := json.Unmarshal(data, &history); err != nil {
-		return nil, err
+		absPath, _ := filepath.Abs(s.historyFile)
+		return nil, fmt.Errorf("failed to parse history JSON at %s: %w", absPath, err)
 	}
 
 	return history, nil
@@ -86,6 +98,28 @@ func (s *Storage) GetHistory() ([]HistoryItem, error) {
 func (s *Storage) ClearHistory() error {
 	s.init()
 	return os.WriteFile(s.historyFile, []byte("[]"), 0644)
+}
+
+func (s *Storage) RemoveFromHistory(index int) error {
+	s.init()
+
+	history, err := s.GetHistory()
+	if err != nil {
+		return err
+	}
+
+	if index < 0 || index >= len(history) {
+		return fmt.Errorf("invalid index")
+	}
+
+	history = append(history[:index], history[index+1:]...)
+
+	data, err := json.MarshalIndent(history, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(s.historyFile, data, 0644)
 }
 
 func (s *Storage) CreatePlaylist(name string) error {
@@ -172,6 +206,44 @@ func (s *Storage) RemoveFromPlaylist(playlistName string, index int) error {
 	}
 
 	return os.WriteFile(path, data, 0644)
+}
+
+func (s *Storage) ToggleFavorite(video youtube.Video) (bool, error) {
+	s.init()
+	playlistName := "favorit"
+	path := filepath.Join(s.playlistDir, playlistName+".json")
+
+	videos, _ := s.GetPlaylist(playlistName)
+
+	found := -1
+	for i, v := range videos {
+		if (v.ID != "" && v.ID == video.ID) || (v.URL != "" && v.URL == video.URL) {
+			found = i
+			break
+		}
+	}
+
+	added := false
+	if found != -1 {
+		videos = append(videos[:found], videos[found+1:]...)
+	} else {
+		videos = append([]youtube.Video{video}, videos...)
+		added = true
+	}
+
+	data, err := json.MarshalIndent(videos, "", "  ")
+	if err != nil {
+		return false, err
+	}
+
+	err = os.WriteFile(path, data, 0644)
+	return added, err
+}
+
+func (s *Storage) ClearPlaylist(name string) error {
+	s.init()
+	path := filepath.Join(s.playlistDir, name+".json")
+	return os.WriteFile(path, []byte("[]"), 0644)
 }
 
 func (s *Storage) DeletePlaylist(name string) error {

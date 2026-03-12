@@ -12,8 +12,20 @@ type Config struct {
 }
 
 func Load() *Config {
-	home, _ := os.UserHomeDir()
-	dataDir := filepath.Join(home, ".yt-tui")
+	home := os.Getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+
+	dataDir := os.Getenv("YT_TUI_DIR")
+	if dataDir == "" {
+		xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+		if xdgConfig != "" {
+			dataDir = filepath.Join(xdgConfig, "yt-tui")
+		} else {
+			dataDir = filepath.Join(home, ".yt-tui")
+		}
+	}
 
 	os.MkdirAll(dataDir, 0755)
 

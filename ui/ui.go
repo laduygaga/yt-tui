@@ -3,7 +3,9 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,32 +33,39 @@ var (
 )
 
 type Model struct {
-	cfg           *config.Config
-	store         *storage.Storage
-	videos        []youtube.Video
-	selectedIdx   int
-	mode          string
-	view          string
-	loading       bool
-	loadingText   string
-	nowPlaying    string
-	searchInput   textinput.Model
-	playlists     []string
-	showPlaylists bool
-	showHelp      bool
-	width         int
-	height        int
-	scrollIdx     int
-	playerCmd     *exec.Cmd
-	isPaused      bool
-	progress      progress.Model
-	currentTime   float64
-	totalTime     float64
-	program       *tea.Program
+	cfg             *config.Config
+	store           *storage.Storage
+	videos          []youtube.Video
+	selectedIdx     int
+	mode            string
+	view            string
+	loading         bool
+	loadingText     string
+	statusMsg       string
+	nowPlaying      string
+	searchInput     textinput.Model
+	playlists       []string
+	showPlaylists   bool
+	showHelp        bool
+	width           int
+	height          int
+	scrollIdx       int
+	playerCmd       *exec.Cmd
+	isPaused        bool
+	lastKey         string
+	progress        progress.Model
+	currentTime     float64
+	totalTime       float64
+	program         *tea.Program
+	mainVideos      []youtube.Video
+	mainSelected    int
+	mainScroll      int
+	currentPlaylist string
 }
 
 type progressMsg float64
 type syncTimeMsg float64
+type clearStatusMsg struct{}
 
 func (m *Model) tickProgress() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
@@ -107,9 +116,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentTime = m.totalTime
 		}
 		return m, nil
+	case clearStatusMsg:
+		m.statusMsg = ""
+		return m, nil
 	case searchResultMsg:
 		m.loading = false
 		m.videos = msg.videos
+		if m.view == "main" {
+			m.mainVideos = msg.videos
+		}
+		if msg.err != nil {
+			m.loadingText = msg.err.Error()
+			m.loading = true
+			return m, nil
+		}
 		m.selectedIdx = 0
 		m.scrollIdx = 0
 		m.mode = "normal"
@@ -120,11 +140,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nowPlaying = ""
 			return m, nil
 		}
-		m.nowPlaying = msg.title
+		m.nowPlaying = msg.video.Title
 		m.isPaused = false
 		m.currentTime = 0
-		m.totalTime = parseDuration(msg.duration)
-		return m, tea.Batch(m.startPlayer(msg.url, msg.title), m.tickProgress())
+		m.totalTime = parseDuration(msg.video.Duration)
+		if msg.url != "" {
+			msg.video.URL = msg.url
+			m.store.AddToHistory(msg.video)
+		}
+		return m, tea.Batch(m.startPlayer(msg.url, msg.video.Title), m.tickProgress())
 	case progressMsg:
 		if m.playerCmd != nil && m.playerCmd.Process != nil && !m.isPaused {
 			m.currentTime += float64(msg)
@@ -189,9 +213,6 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 	if err != nil {
 		m.nowPlaying = "Error: " + err.Error()
 	}
-
-	video := youtube.Video{Title: title}
-	m.store.AddToHistory(video)
 
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -274,22 +295,54 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.showPlaylists {
+		return m.handlePlaylistKey(msg)
+	}
+
 	switch msg.String() {
-	case "ctrl+c", "esc":
+	case "ctrl+c":
 		m.stopPlayer()
 		return m, tea.Quit
-	case "?":
-		m.showHelp = true
+	case "ctrl+l":
+		if m.view == "history" {
+			m.store.ClearHistory()
+			m.statusMsg = "History cleared"
+			return m, tea.Batch(
+				m.loadHistory(),
+				tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+					return clearStatusMsg{}
+				}),
+			)
+		}
+		if m.view == "playlist" && m.currentPlaylist == "favorit" {
+			m.store.ClearPlaylist("favorit")
+			m.videos = []youtube.Video{}
+			m.statusMsg = "Favorit cleared"
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
 		return m, nil
-	case "q":
-		if m.showPlaylists {
-			m.showPlaylists = false
+	case "esc", "q":
+		if m.view != "main" {
+			m.view = "main"
+			m.videos = m.mainVideos
+			m.selectedIdx = m.mainSelected
+			m.scrollIdx = m.mainScroll
+			if len(m.videos) == 0 {
+				return m, m.searchVideos("trending")
+			}
 			return m, nil
 		}
 		if m.mode == "insert" {
 			m.mode = "normal"
 			m.searchInput.Blur()
+			return m, nil
 		}
+		m.stopPlayer()
+		return m, tea.Quit
+	case "?":
+		m.showHelp = true
 		return m, nil
 	}
 
@@ -345,7 +398,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		m.stopPlayer()
 		return m, nil
+	case "d":
+		if m.lastKey == "d" {
+			m.lastKey = ""
+			if m.view == "history" && len(m.videos) > 0 {
+				m.store.RemoveFromHistory(m.selectedIdx)
+				return m, m.loadHistory()
+			}
+		} else {
+			m.lastKey = "d"
+		}
+		return m, nil
 	case "g":
+		m.lastKey = "g"
 		m.selectedIdx = 0
 		m.scrollIdx = 0
 		m.mode = "normal"
@@ -361,17 +426,52 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingText = "Getting stream..."
 			return m, m.playVideo(video)
 		}
-	case "H", "P":
+	case "*":
+		if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
+			video := m.videos[m.selectedIdx]
+			added, err := m.store.ToggleFavorite(video)
+			if err == nil {
+				if added {
+					m.statusMsg = "Added to favorit"
+				} else {
+					m.statusMsg = "Removed from favorit"
+				}
+
+				if m.view == "playlist" && m.currentPlaylist == "favorit" {
+					videos, _ := m.store.GetPlaylist("favorit")
+					m.videos = videos
+					if m.selectedIdx >= len(m.videos) && len(m.videos) > 0 {
+						m.selectedIdx = len(m.videos) - 1
+					}
+				}
+
+				return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+					return clearStatusMsg{}
+				})
+			}
+		}
+		return m, nil
+	case "H":
+		if m.view == "main" {
+			m.mainSelected = m.selectedIdx
+			m.mainScroll = m.scrollIdx
+		}
+		m.view = "history"
+		m.videos = []youtube.Video{}
+		m.loading = true
+		m.loadingText = "Loading history..."
+		return m, m.loadHistory()
+	case "P":
+		if m.view == "main" {
+			m.mainSelected = m.selectedIdx
+			m.mainScroll = m.scrollIdx
+		}
 		m.showPlaylists = true
 		m.selectedIdx = 0
 		m.scrollIdx = 0
 		playlists, _ := m.store.ListPlaylists()
 		m.playlists = playlists
 		return m, nil
-	}
-
-	if m.showPlaylists {
-		return m.handlePlaylistKey(msg)
 	}
 
 	return m, nil
@@ -383,7 +483,15 @@ func (m *Model) fixScroll() {
 		itemHeight = 1
 	}
 
-	maxItems := (m.height - 15) / itemHeight
+	offset := 15
+	if m.height < offset+2 {
+		offset = m.height - 2
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
+	maxItems := (m.height - offset) / itemHeight
 	if maxItems < 1 {
 		maxItems = 1
 	}
@@ -406,7 +514,10 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx < len(m.playlists)+2 {
 			if m.selectedIdx == 0 {
 				m.view = "history"
+				m.videos = []youtube.Video{}
 				m.showPlaylists = false
+				m.loading = true
+				m.loadingText = "Loading history..."
 				return m, m.loadHistory()
 			} else if m.selectedIdx == 1 {
 				m.showPlaylists = false
@@ -415,6 +526,7 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx := m.selectedIdx - 2
 			if idx < len(m.playlists) {
 				playlistName := m.playlists[idx]
+				m.currentPlaylist = playlistName
 				videos, _ := m.store.GetPlaylist(playlistName)
 				m.videos = videos
 				m.selectedIdx = 0
@@ -436,8 +548,13 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "h", "q":
 		m.showPlaylists = false
-		m.selectedIdx = 0
-		m.scrollIdx = 0
+		if m.view == "main" {
+			m.selectedIdx = m.mainSelected
+			m.scrollIdx = m.mainScroll
+		} else {
+			m.selectedIdx = 0
+			m.scrollIdx = 0
+		}
 		m.mode = "normal"
 	}
 	return m, nil
@@ -452,6 +569,7 @@ func (m *Model) View() string {
 	}
 
 	var mainContent string
+	var details string
 
 	if m.mode == "insert" {
 		mainContent = m.searchInput.View()
@@ -468,15 +586,17 @@ func (m *Model) View() string {
 		mainContent = normalStyle.Render("No videos found")
 	} else {
 		mainContent = m.videoListView()
+		details = m.detailsView()
 	}
 
-	details := m.detailsView()
-
-	layout := lipgloss.JoinVertical(
-		lipgloss.Left,
-		mainContent,
-		details,
-	)
+	layout := mainContent
+	if details != "" {
+		layout = lipgloss.JoinVertical(
+			lipgloss.Left,
+			mainContent,
+			details,
+		)
+	}
 
 	border := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -490,7 +610,7 @@ func (m *Model) View() string {
 	content := border.Render(
 		lipgloss.JoinVertical(
 			lipgloss.Left,
-			titleStyle.Render("YouTube TUI"),
+			titleStyle.Render("YouTube TUI"+getTitleSuffix(m)),
 			layout,
 		),
 	)
@@ -523,6 +643,10 @@ func (m *Model) View() string {
 		statusBar = normalStyle.Render(modeStr + " j/k: navigate  h/l: seek  p: pause  s: stop  ?: help  esc: quit")
 	}
 
+	if m.statusMsg != "" {
+		statusBar = statusBar + "\n" + lipgloss.NewStyle().Foreground(yellow).Render("» "+m.statusMsg)
+	}
+
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		content,
@@ -542,11 +666,14 @@ func (m *Model) helpView() string {
   Enter/Spc:   Play video
   p:           Pause/Resume
   s:           Stop current song
+  *:           Toggle Favorite
+  dd:          Delete item
+  Ctrl+L:      Clear list (History/Favorit)
   i/ /:        Search mode
   H/P:         Playlists / History
   ?:           Show/hide help
-  q:           Back / Normal mode
-  esc/Ctrl+C:  Quit
+  q/esc:       Back / Normal mode / Quit
+  Ctrl+C:      Force Quit
 `
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -556,10 +683,22 @@ func (m *Model) helpView() string {
 }
 
 func (m *Model) videoListView() string {
+	if len(m.videos) == 0 {
+		return normalStyle.Render("No videos in current list")
+	}
+
 	var lines []string
 
+	offset := 15
+	if m.height < offset+2 {
+		offset = m.height - 2
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
 	// Each video takes 2 lines
-	maxItems := (m.height - 15) / 2
+	maxItems := (m.height - offset) / 2
 	if maxItems < 1 {
 		maxItems = 1
 	}
@@ -622,7 +761,15 @@ func (m *Model) playlistsView() string {
 	items := []string{"View History", "Back"}
 	items = append(items, m.playlists...)
 
-	maxHeight := m.height - 10
+	offset := 15
+	if m.height < offset+2 {
+		offset = m.height - 2
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
+	maxHeight := m.height - offset
 	if maxHeight < 1 {
 		maxHeight = 1
 	}
@@ -661,8 +808,14 @@ func (m *Model) playlistsView() string {
 }
 
 func (m *Model) searchVideos(query string) tea.Cmd {
+	m.view = "main"
 	m.loading = true
 	m.loadingText = "Searching " + query + "..."
+	m.selectedIdx = 0
+	m.scrollIdx = 0
+	m.mainSelected = 0
+	m.mainScroll = 0
+	m.videos = []youtube.Video{}
 	return func() tea.Msg {
 		videos, err := youtube.Search(query, m.cfg.MaxResults)
 		return searchResultMsg{videos: videos, err: err}
@@ -673,17 +826,25 @@ func (m *Model) playVideo(video youtube.Video) tea.Cmd {
 	return func() tea.Msg {
 		url, err := youtube.GetStreamURL(video.URL)
 		if err != nil {
-			return playResultMsg{url: "", title: video.Title, duration: video.Duration, err: err}
+			return playResultMsg{url: "", video: video, err: err}
 		}
 		url = strings.TrimSpace(url)
-		return playResultMsg{url: url, title: video.Title, duration: video.Duration, err: nil}
+		return playResultMsg{url: url, video: video, err: nil}
 	}
 }
 
 func (m *Model) loadHistory() tea.Cmd {
 	return func() tea.Msg {
 		history, err := m.store.GetHistory()
-		if err != nil || len(history) == 0 {
+		if err != nil {
+			return searchResultMsg{videos: nil, err: err}
+		}
+		if len(history) == 0 {
+			path := filepath.Join(m.cfg.DataDir, "history.json")
+			info, _ := os.Stat(path)
+			if info != nil && info.Size() > 10 {
+				return searchResultMsg{videos: nil, err: fmt.Errorf("loaded 0 items from %dB file", info.Size())}
+			}
 			return searchResultMsg{videos: []youtube.Video{}, err: nil}
 		}
 		var videos []youtube.Video
@@ -700,13 +861,28 @@ type searchResultMsg struct {
 }
 
 type playResultMsg struct {
-	url      string
-	title    string
-	duration string
-	err      error
+	url   string
+	video youtube.Video
+	err   error
+}
+
+func getTitleSuffix(m *Model) string {
+	if m.view == "history" {
+		return fmt.Sprintf(" - History (%d)", len(m.videos))
+	}
+	if m.view == "playlist" {
+		return fmt.Sprintf(" - %s (%d)", m.currentPlaylist, len(m.videos))
+	}
+	return ""
 }
 
 func truncate(s string, maxLen int) string {
+	if maxLen < 5 {
+		if len(s) > 0 {
+			return "..."
+		}
+		return ""
+	}
 	if len(s) <= maxLen {
 		return s
 	}
