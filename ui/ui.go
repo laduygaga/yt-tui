@@ -64,7 +64,10 @@ type Model struct {
 }
 
 type progressMsg float64
-type syncTimeMsg float64
+type syncTimeMsg struct {
+	Current float64
+	Total   float64
+}
 type clearStatusMsg struct{}
 
 func (m *Model) tickProgress() tea.Cmd {
@@ -94,7 +97,7 @@ func New(cfg *config.Config, store *storage.Storage) *Model {
 		loading:     false,
 		loadingText: "",
 		searchInput: ti,
-		progress:    progress.New(progress.WithDefaultGradient()),
+		progress:    progress.New(progress.WithScaledGradient("#000000", "#696c77")),
 	}
 }
 
@@ -111,7 +114,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case syncTimeMsg:
-		m.currentTime = float64(msg)
+		m.currentTime = msg.Current
+		if msg.Total > 0 {
+			m.totalTime = msg.Total
+		}
 		if m.currentTime > m.totalTime {
 			m.currentTime = m.totalTime
 		}
@@ -142,11 +148,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.nowPlaying = msg.video.Title
 		m.isPaused = false
-		m.currentTime = 0
-		m.totalTime = parseDuration(msg.video.Duration)
 		if msg.url != "" {
 			msg.video.URL = msg.url
 			m.store.AddToHistory(msg.video)
+			m.currentTime = 0
+			m.totalTime = parseDuration(msg.video.Duration)
 		}
 		return m, tea.Batch(m.startPlayer(msg.url, msg.video.Title), m.tickProgress())
 	case progressMsg:
@@ -182,11 +188,20 @@ func parseDuration(duration string) float64 {
 	if duration == "" {
 		return 0
 	}
+
+	if !strings.Contains(duration, ":") {
+		var val float64
+		_, err := fmt.Sscanf(duration, "%f", &val)
+		if err == nil {
+			return val
+		}
+	}
+
 	parts := strings.Split(duration, ":")
 	var seconds float64
 	for i, part := range parts {
-		var val int
-		_, err := fmt.Sscanf(part, "%d", &val)
+		var val float64
+		_, err := fmt.Sscanf(part, "%f", &val)
 		if err != nil {
 			continue
 		}
@@ -197,7 +212,7 @@ func parseDuration(duration string) float64 {
 		} else if pos == 2 {
 			multiplier = 3600.0
 		}
-		seconds += float64(val) * multiplier
+		seconds += val * multiplier
 	}
 	return seconds
 }
@@ -230,8 +245,23 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 					Error string  `json:"error"`
 				}
 				if jsonErr := json.Unmarshal(out, &resp); jsonErr == nil && resp.Error == "success" {
+					currentTime := resp.Data
+
+					durCmd := `{"command":["get_property","duration"]}`
+					durOut, durErr := exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U %s", durCmd, socketPath)).Output()
+					totalTime := 0.0
+					if durErr == nil {
+						var durResp struct {
+							Data  float64 `json:"data"`
+							Error string  `json:"error"`
+						}
+						if jErr := json.Unmarshal(durOut, &durResp); jErr == nil && durResp.Error == "success" {
+							totalTime = durResp.Data
+						}
+					}
+
 					if m.program != nil {
-						m.program.Send(syncTimeMsg(resp.Data))
+						m.program.Send(syncTimeMsg{Current: currentTime, Total: totalTime})
 					}
 				}
 			}
@@ -630,6 +660,8 @@ func (m *Model) View() string {
 				m.progress.Width = 20
 			}
 			progressStr = "\n" + m.progress.ViewAs(pct) + fmt.Sprintf(" %s / %s", formatTime(m.currentTime), formatTime(m.totalTime))
+		} else if m.currentTime > 0 {
+			progressStr = "\n" + fmt.Sprintf(" %s / --:-- (Loading duration...)", formatTime(m.currentTime))
 		}
 
 		statusBar = lipgloss.NewStyle().Foreground(green).Render(status) + normalStyle.Render(m.nowPlaying) + progressStr
