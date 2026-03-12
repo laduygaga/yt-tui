@@ -33,34 +33,38 @@ var (
 )
 
 type Model struct {
-	cfg             *config.Config
-	store           *storage.Storage
-	videos          []youtube.Video
-	selectedIdx     int
-	mode            string
-	view            string
-	loading         bool
-	loadingText     string
-	statusMsg       string
-	nowPlaying      string
-	searchInput     textinput.Model
-	playlists       []string
-	showPlaylists   bool
-	showHelp        bool
-	width           int
-	height          int
-	scrollIdx       int
-	playerCmd       *exec.Cmd
-	isPaused        bool
-	lastKey         string
-	progress        progress.Model
-	currentTime     float64
-	totalTime       float64
-	program         *tea.Program
-	mainVideos      []youtube.Video
-	mainSelected    int
-	mainScroll      int
-	currentPlaylist string
+	cfg                 *config.Config
+	store               *storage.Storage
+	videos              []youtube.Video
+	selectedIdx         int
+	mode                string
+	view                string
+	loading             bool
+	loadingText         string
+	statusMsg           string
+	nowPlaying          string
+	searchInput         textinput.Model
+	playlists           []string
+	showPlaylists       bool
+	showHelp            bool
+	width               int
+	height              int
+	scrollIdx           int
+	playerCmd           *exec.Cmd
+	isPaused            bool
+	lastKey             string
+	progress            progress.Model
+	currentTime         float64
+	totalTime           float64
+	program             *tea.Program
+	mainVideos          []youtube.Video
+	mainSelected        int
+	mainScroll          int
+	currentPlaylist     string
+	transcript          *youtube.Transcript
+	showSubtitles       bool
+	showTranscriptView  bool
+	transcriptScrollIdx int
 }
 
 type progressMsg float64
@@ -154,7 +158,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentTime = 0
 			m.totalTime = parseDuration(msg.video.Duration)
 		}
-		return m, tea.Batch(m.startPlayer(msg.url, msg.video.Title), m.tickProgress())
+		return m, tea.Batch(m.startPlayer(msg.url, msg.video.Title), m.tickProgress(), m.loadTranscript(msg.video.ID))
+	case transcriptResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "Transcript unavailable: " + msg.err.Error()
+			return m, tea.Tick(time.Second*4, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		if msg.transcript != nil {
+			m.transcript = msg.transcript
+			m.store.SaveTranscript(msg.transcript)
+			m.statusMsg = "Transcript loaded"
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		return m, nil
 	case progressMsg:
 		if m.playerCmd != nil && m.playerCmd.Process != nil && !m.isPaused {
 			m.currentTime += float64(msg)
@@ -265,7 +285,7 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 					}
 				}
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 
@@ -321,6 +341,34 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showHelp {
 		if msg.String() == "?" || msg.String() == "esc" || msg.String() == "q" {
 			m.showHelp = false
+		}
+		return m, nil
+	}
+
+	if m.showTranscriptView {
+		switch msg.String() {
+		case "t", "esc", "q":
+			m.showTranscriptView = false
+			return m, nil
+		case "j", "down":
+			if m.transcriptScrollIdx < len(m.transcript.Lines)-1 {
+				m.transcriptScrollIdx++
+			}
+			return m, nil
+		case "k", "up":
+			if m.transcriptScrollIdx > 0 {
+				m.transcriptScrollIdx--
+			}
+			return m, nil
+		case "g":
+			m.transcriptScrollIdx = 0
+			return m, nil
+		case "G":
+			m.transcriptScrollIdx = len(m.transcript.Lines) - 1
+			if m.transcriptScrollIdx < 0 {
+				m.transcriptScrollIdx = 0
+			}
+			return m, nil
 		}
 		return m, nil
 	}
@@ -502,6 +550,29 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		playlists, _ := m.store.ListPlaylists()
 		m.playlists = playlists
 		return m, nil
+	case "c":
+		m.showSubtitles = !m.showSubtitles
+		if m.showSubtitles {
+			m.statusMsg = "Subtitles ON"
+		} else {
+			m.statusMsg = "Subtitles OFF"
+		}
+		return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
+	case "t":
+		if m.nowPlaying != "" {
+			m.showTranscriptView = !m.showTranscriptView
+			if m.showTranscriptView {
+				m.statusMsg = "Transcript view ON"
+			} else {
+				m.statusMsg = "Transcript view OFF"
+			}
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -597,6 +668,9 @@ func (m *Model) View() string {
 	if m.showPlaylists {
 		return m.playlistsView()
 	}
+	if m.showTranscriptView {
+		return m.transcriptView()
+	}
 
 	var mainContent string
 	var details string
@@ -679,11 +753,103 @@ func (m *Model) View() string {
 		statusBar = statusBar + "\n" + lipgloss.NewStyle().Foreground(yellow).Render("» "+m.statusMsg)
 	}
 
+	var subtitleSection string
+	var hasSubtitleSection bool
+	if m.nowPlaying != "" && m.showSubtitles {
+		hasSubtitleSection = true
+		if m.transcript == nil {
+			subtitleSection = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Width(m.width - 4).
+				Align(lipgloss.Center).
+				Render("[Loading subtitles...]")
+		} else if len(m.transcript.Lines) == 0 {
+			subtitleSection = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Width(m.width - 4).
+				Align(lipgloss.Center).
+				Render("[No subtitles available]")
+		} else {
+			currentSub := m.getCurrentSubtitle()
+			if currentSub != "" {
+				subText := "▼ " + currentSub
+				if len(subText) > m.width-10 {
+					subText = subText[:m.width-13] + "..."
+				}
+				subtitleSection = lipgloss.NewStyle().
+					Foreground(cyan).
+					Width(m.width - 4).
+					Align(lipgloss.Center).
+					Render(subText)
+			} else {
+				subtitleSection = " "
+			}
+		}
+	}
+
+	if hasSubtitleSection {
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			content,
+			"",
+			subtitleSection,
+			"",
+			statusBar,
+		)
+	}
+
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		content,
+		"",
 		statusBar,
 	)
+}
+
+func (m *Model) transcriptView() string {
+	if m.transcript == nil || len(m.transcript.Lines) == 0 {
+		return normalStyle.Render("No transcript available")
+	}
+
+	var lines []string
+	lines = append(lines, titleStyle.Render("TRANSCRIPT (j/k to scroll, t to close)"))
+	lines = append(lines, "")
+
+	maxLines := m.height - 5
+	if maxLines < 1 {
+		maxLines = 1
+	}
+
+	endIdx := m.transcriptScrollIdx + maxLines
+	if endIdx > len(m.transcript.Lines) {
+		endIdx = len(m.transcript.Lines)
+	}
+
+	for i := m.transcriptScrollIdx; i < endIdx; i++ {
+		line := m.transcript.Lines[i]
+		timeStr := formatTime(line.Start)
+		text := line.Text
+		if len(text) > m.width-15 {
+			text = text[:m.width-18] + "..."
+		}
+
+		isCurrent := m.currentTime >= (line.Start-0.3) && m.currentTime < (line.Start+line.Duration+0.1)
+		if isCurrent {
+			lines = append(lines, selectedStyle.Render(fmt.Sprintf("[%s] ▶ %s", timeStr, text)))
+		} else {
+			lines = append(lines, normalStyle.Render(fmt.Sprintf("[%s]   %s", timeStr, text)))
+		}
+	}
+
+	if endIdx < len(m.transcript.Lines) {
+		lines = append(lines, secondaryStyle.Render(fmt.Sprintf("... %d more lines (j to scroll)", len(m.transcript.Lines)-endIdx)))
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(cyan).
+		Padding(1).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 func (m *Model) helpView() string {
@@ -698,6 +864,8 @@ func (m *Model) helpView() string {
   Enter/Spc:   Play video
   p:           Pause/Resume
   s:           Stop current song
+  c:           Toggle captions/subtitles (while playing)
+  t:           Toggle transcript view (while playing)
   *:           Toggle Favorite
   dd:          Delete item
   Ctrl+L:      Clear list (History/Favorit)
@@ -781,6 +949,21 @@ func (m *Model) detailsView() string {
 		titleStyle.Render("Description:"),
 		secondaryStyle.Render(truncate(v.Description, width*3)),
 	)
+}
+
+func (m *Model) getCurrentSubtitle() string {
+	if m.transcript == nil || len(m.transcript.Lines) == 0 {
+		return ""
+	}
+
+	for _, line := range m.transcript.Lines {
+		startTime := line.Start - 0.3
+		endTime := line.Start + line.Duration + 0.1
+		if m.currentTime >= startTime && m.currentTime < endTime {
+			return line.Text
+		}
+	}
+	return ""
 }
 
 func (m *Model) playlistsView() string {
@@ -887,6 +1070,22 @@ func (m *Model) loadHistory() tea.Cmd {
 	}
 }
 
+func (m *Model) loadTranscript(videoID string) tea.Cmd {
+	return func() tea.Msg {
+		cached, err := m.store.GetTranscript(videoID)
+		if err == nil && cached != nil {
+			return transcriptResultMsg{transcript: cached, err: nil}
+		}
+
+		transcript, err := youtube.GetTranscript(videoID)
+		if err != nil {
+			return transcriptResultMsg{transcript: nil, err: err}
+		}
+
+		return transcriptResultMsg{transcript: transcript, err: nil}
+	}
+}
+
 type searchResultMsg struct {
 	videos []youtube.Video
 	err    error
@@ -896,6 +1095,11 @@ type playResultMsg struct {
 	url   string
 	video youtube.Video
 	err   error
+}
+
+type transcriptResultMsg struct {
+	transcript *youtube.Transcript
+	err        error
 }
 
 func getTitleSuffix(m *Model) string {

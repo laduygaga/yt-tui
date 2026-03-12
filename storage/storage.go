@@ -17,21 +17,26 @@ type HistoryItem struct {
 }
 
 type Storage struct {
-	config      *config.Config
-	historyFile string
-	playlistDir string
+	config        *config.Config
+	historyFile   string
+	playlistDir   string
+	transcriptDir string
 }
 
 func New(cfg *config.Config) *Storage {
 	return &Storage{
-		config:      cfg,
-		historyFile: filepath.Join(cfg.DataDir, "history.json"),
-		playlistDir: filepath.Join(cfg.DataDir, "playlists"),
+		config:        cfg,
+		historyFile:   filepath.Join(cfg.DataDir, "history.json"),
+		playlistDir:   filepath.Join(cfg.DataDir, "playlists"),
+		transcriptDir: filepath.Join(cfg.DataDir, "transcripts"),
 	}
 }
 
 func (s *Storage) init() error {
 	if err := os.MkdirAll(s.playlistDir, 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.transcriptDir, 0755); err != nil {
 		return err
 	}
 	if _, err := os.Stat(s.historyFile); os.IsNotExist(err) {
@@ -250,4 +255,28 @@ func (s *Storage) DeletePlaylist(name string) error {
 	s.init()
 	path := filepath.Join(s.playlistDir, name+".json")
 	return os.Remove(path)
+}
+
+func (s *Storage) SaveTranscript(transcript *youtube.Transcript) error {
+	s.init()
+	path := filepath.Join(s.transcriptDir, transcript.VideoID+".json")
+	data, err := json.MarshalIndent(transcript, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (s *Storage) GetTranscript(videoID string) (*youtube.Transcript, error) {
+	s.init()
+	path := filepath.Join(s.transcriptDir, videoID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var transcript youtube.Transcript
+	if err := json.Unmarshal(data, &transcript); err != nil {
+		return nil, err
+	}
+	return &transcript, nil
 }
