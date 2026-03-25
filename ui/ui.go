@@ -65,6 +65,8 @@ type Model struct {
 	showSubtitles       bool
 	showTranscriptView  bool
 	transcriptScrollIdx int
+	playbackSpeed       float64
+	isLooping           bool
 }
 
 type progressMsg float64
@@ -73,6 +75,7 @@ type syncTimeMsg struct {
 	Total   float64
 }
 type clearStatusMsg struct{}
+type songEndedMsg struct{}
 
 func (m *Model) tickProgress() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
@@ -92,16 +95,17 @@ func New(cfg *config.Config, store *storage.Storage) *Model {
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(gray)
 
 	return &Model{
-		cfg:         cfg,
-		store:       store,
-		videos:      []youtube.Video{},
-		selectedIdx: 0,
-		mode:        "normal",
-		view:        "main",
-		loading:     false,
-		loadingText: "",
-		searchInput: ti,
-		progress:    progress.New(progress.WithScaledGradient("#000000", "#696c77")),
+		cfg:           cfg,
+		store:         store,
+		videos:        []youtube.Video{},
+		selectedIdx:   0,
+		mode:          "normal",
+		view:          "main",
+		loading:       false,
+		loadingText:   "",
+		searchInput:   ti,
+		progress:      progress.New(progress.WithScaledGradient("#000000", "#696c77")),
+		playbackSpeed: 1.0,
 	}
 }
 
@@ -184,6 +188,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.tickProgress()
 		}
 		return m, nil
+	case songEndedMsg:
+		if !m.isLooping && (m.view == "playlist" || m.view == "history") && len(m.videos) > 0 {
+			nextIdx := m.selectedIdx + 1
+			if nextIdx < len(m.videos) {
+				m.selectedIdx = nextIdx
+				m.fixScroll()
+				video := m.videos[m.selectedIdx]
+				m.loading = true
+				m.loadingText = "Getting stream..."
+				return m, m.playVideo(video)
+			}
+		}
+		m.stopPlayer()
+		return m, nil
 	case progress.FrameMsg:
 		progressModel, cmd := m.progress.Update(msg)
 		m.progress = progressModel.(progress.Model)
@@ -242,12 +260,22 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 		m.playerCmd.Process.Kill()
 	}
 
+	m.playbackSpeed = 1.0
+	m.isLooping = false
+
 	socketPath := "/tmp/yt-tui-mpv.sock"
 	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 	err := m.playerCmd.Start()
 	if err != nil {
 		m.nowPlaying = "Error: " + err.Error()
 	}
+
+	go func() {
+		m.playerCmd.Wait()
+		if m.program != nil && !m.isLooping {
+			m.program.Send(songEndedMsg{})
+		}
+	}()
 
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -333,6 +361,42 @@ func (m *Model) seek(seconds float64) {
 
 	go func() {
 		cmdStr := fmt.Sprintf(`{"command":["seek",%f,"relative"]}`, seconds)
+		exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U /tmp/yt-tui-mpv.sock", cmdStr)).Run()
+	}()
+}
+
+func (m *Model) changeSpeed(delta float64) {
+	if m.playerCmd == nil || m.playerCmd.Process == nil {
+		return
+	}
+
+	m.playbackSpeed += delta
+	if m.playbackSpeed < 0.25 {
+		m.playbackSpeed = 0.25
+	}
+	if m.playbackSpeed > 2.0 {
+		m.playbackSpeed = 2.0
+	}
+
+	go func() {
+		cmdStr := fmt.Sprintf(`{"command":["set_property","speed",%f]}`, m.playbackSpeed)
+		exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U /tmp/yt-tui-mpv.sock", cmdStr)).Run()
+	}()
+}
+
+func (m *Model) toggleLoop() {
+	if m.playerCmd == nil || m.playerCmd.Process == nil {
+		return
+	}
+
+	m.isLooping = !m.isLooping
+	loopVal := "inf"
+	if !m.isLooping {
+		loopVal = "no"
+	}
+
+	go func() {
+		cmdStr := fmt.Sprintf(`{"command":["set_property","loop-file","%s"]}`, loopVal)
 		exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | nc -w 1 -U /tmp/yt-tui-mpv.sock", cmdStr)).Run()
 	}()
 }
@@ -473,6 +537,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.playVideo(video)
 		}
 		return m, nil
+	case "L":
+		if m.nowPlaying != "" {
+			m.toggleLoop()
+			if m.isLooping {
+				m.statusMsg = "Loop: ON"
+			} else {
+				m.statusMsg = "Loop: OFF"
+			}
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		return m, nil
 	case "s":
 		m.stopPlayer()
 		return m, nil
@@ -568,6 +645,24 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusMsg = "Transcript view OFF"
 			}
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		return m, nil
+	case "[":
+		if m.nowPlaying != "" {
+			m.changeSpeed(-0.25)
+			m.statusMsg = fmt.Sprintf("Speed: %.2fx", m.playbackSpeed)
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		return m, nil
+	case "]":
+		if m.nowPlaying != "" {
+			m.changeSpeed(0.25)
+			m.statusMsg = fmt.Sprintf("Speed: %.2fx", m.playbackSpeed)
 			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
 				return clearStatusMsg{}
 			})
@@ -720,10 +815,14 @@ func (m *Model) View() string {
 	)
 
 	var statusBar string
-	if m.nowPlaying != "" {
+	isPlayerActive := m.playerCmd != nil && m.playerCmd.Process != nil
+	if isPlayerActive && m.nowPlaying != "" {
 		status := "▶ Playing: "
 		if m.isPaused {
 			status = "⏸ Paused: "
+		}
+		if m.isLooping {
+			status += "🔁 "
 		}
 
 		var progressStr string
@@ -733,9 +832,17 @@ func (m *Model) View() string {
 			if m.progress.Width < 20 {
 				m.progress.Width = 20
 			}
-			progressStr = "\n" + m.progress.ViewAs(pct) + fmt.Sprintf(" %s / %s", formatTime(m.currentTime), formatTime(m.totalTime))
+			timeStr := fmt.Sprintf(" %s / %s", formatTime(m.currentTime), formatTime(m.totalTime))
+			if m.playbackSpeed != 1.0 {
+				timeStr += fmt.Sprintf(" [%.2fx]", m.playbackSpeed)
+			}
+			progressStr = "\n" + m.progress.ViewAs(pct) + timeStr
 		} else if m.currentTime > 0 {
-			progressStr = "\n" + fmt.Sprintf(" %s / --:-- (Loading duration...)", formatTime(m.currentTime))
+			timeStr := fmt.Sprintf(" %s / --:-- (Loading duration...)", formatTime(m.currentTime))
+			if m.playbackSpeed != 1.0 {
+				timeStr += fmt.Sprintf(" [%.2fx]", m.playbackSpeed)
+			}
+			progressStr = "\n" + timeStr
 		}
 
 		statusBar = lipgloss.NewStyle().Foreground(green).Render(status) + normalStyle.Render(m.nowPlaying) + progressStr
@@ -746,7 +853,7 @@ func (m *Model) View() string {
 		if m.mode == "insert" {
 			modeStr = "-- INSERT --"
 		}
-		statusBar = normalStyle.Render(modeStr + " j/k: navigate  h/l: seek  p: pause  s: stop  ?: help  esc: quit")
+		statusBar = normalStyle.Render(modeStr + " j/k: navigate  h/l: seek  [/]: speed  p: pause  s: stop  ?: help  esc: quit")
 	}
 
 	if m.statusMsg != "" {
@@ -857,6 +964,8 @@ func (m *Model) helpView() string {
   KEYBINDINGS
   -----------
   h/l:         Seek backward/forward 10s
+  [/]:         Decrease/Increase playback speed (0.25x steps)
+  L:           Toggle loop current song
   j/down:      Move down
   k/up:        Move up
   g:           Go to top
