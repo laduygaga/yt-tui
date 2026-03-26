@@ -44,6 +44,7 @@ func Search(query string, maxResults int) ([]Video, error) {
 	args := []string{
 		"--no-check-certificate",
 		"--flat-playlist",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		"--print", "%(id)s|%(title)s|%(channel)s|%(duration)s|%(view_count)s|%(upload_date)s|%(thumbnail)s|%(description)s|%(url)s",
 		"--", fmt.Sprintf("ytsearch%d:%s", maxResults, query),
 	}
@@ -123,6 +124,9 @@ func GetStreamURL(videoURL string) (string, error) {
 		"--no-check-certificate",
 		"-f", "bestaudio/best",
 		"-g",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"--add-header", "Accept-Language:en-US,en;q=0.9",
+		"--extractor-retries", "3",
 		"--", videoURL,
 	}
 

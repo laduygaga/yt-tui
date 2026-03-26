@@ -67,6 +67,7 @@ type Model struct {
 	transcriptScrollIdx int
 	playbackSpeed       float64
 	isLooping           bool
+	confirmQuit         bool
 }
 
 type progressMsg float64
@@ -110,7 +111,7 @@ func New(cfg *config.Config, store *storage.Storage) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return m.searchVideos("trending")
+	return nil
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -132,6 +133,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case clearStatusMsg:
 		m.statusMsg = ""
+		m.confirmQuit = false
 		return m, nil
 	case searchResultMsg:
 		m.loading = false
@@ -151,8 +153,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playResultMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.nowPlaying = ""
-			return m, nil
+			m.statusMsg = "Failed to play: " + msg.err.Error()
+			return m, tea.Tick(time.Second*4, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
 		}
 		m.nowPlaying = msg.video.Title
 		m.isPaused = false
@@ -200,7 +204,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.playVideo(video)
 			}
 		}
-		m.stopPlayer()
+		if m.currentTime > 1 {
+			m.stopPlayer()
+		}
 		return m, nil
 	case progress.FrameMsg:
 		progressModel, cmd := m.progress.Update(msg)
@@ -264,7 +270,7 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 	m.isLooping = false
 
 	socketPath := "/tmp/yt-tui-mpv.sock"
-	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
+	m.playerCmd = exec.Command(m.cfg.Player, "--no-video", "--quiet", "--ytdl", fmt.Sprintf("--input-ipc-server=%s", socketPath), url)
 	err := m.playerCmd.Start()
 	if err != nil {
 		m.nowPlaying = "Error: " + err.Error()
@@ -402,9 +408,24 @@ func (m *Model) toggleLoop() {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.confirmQuit && msg.String() == "q" {
+		m.stopPlayer()
+		return m, tea.Quit
+	}
+
+	if m.confirmQuit {
+		m.confirmQuit = false
+		m.statusMsg = ""
+	}
+
 	if m.showHelp {
-		if msg.String() == "?" || msg.String() == "esc" || msg.String() == "q" {
+		switch msg.String() {
+		case "?", "esc", "q":
 			m.showHelp = false
+		case "p":
+			if m.playerCmd != nil && m.playerCmd.Process != nil {
+				m.togglePause()
+			}
 		}
 		return m, nil
 	}
@@ -413,6 +434,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "t", "esc", "q":
 			m.showTranscriptView = false
+			return m, nil
+		case "p":
+			if m.playerCmd != nil && m.playerCmd.Process != nil {
+				m.togglePause()
+			}
 			return m, nil
 		case "j", "down":
 			if m.transcriptScrollIdx < len(m.transcript.Lines)-1 {
@@ -466,6 +492,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc", "q":
+		if m.confirmQuit {
+			m.confirmQuit = false
+			return m, nil
+		}
 		if m.view != "main" {
 			m.view = "main"
 			m.videos = m.mainVideos
@@ -481,8 +511,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.searchInput.Blur()
 			return m, nil
 		}
-		m.stopPlayer()
-		return m, tea.Quit
+		m.confirmQuit = true
+		m.statusMsg = "Press 'q' again to quit, or any other key to cancel"
+		return m, tea.Tick(time.Second*3, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
 	case "?":
 		m.showHelp = true
 		return m, nil
@@ -520,7 +553,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "p":
-		m.togglePause()
+		if m.playerCmd != nil && m.playerCmd.Process != nil {
+			m.togglePause()
+		} else if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
+			video := m.videos[m.selectedIdx]
+			m.loading = true
+			m.loadingText = "Getting stream..."
+			return m, m.playVideo(video)
+		}
 		return m, nil
 	case "h":
 		if m.nowPlaying != "" {
@@ -607,6 +647,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "H":
+		if m.view == "history" {
+			m.view = "main"
+			m.videos = m.mainVideos
+			m.selectedIdx = m.mainSelected
+			m.scrollIdx = m.mainScroll
+			if len(m.videos) == 0 {
+				return m, m.searchVideos("trending")
+			}
+			return m, nil
+		}
 		if m.view == "main" {
 			m.mainSelected = m.selectedIdx
 			m.mainScroll = m.scrollIdx
@@ -617,6 +667,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadingText = "Loading history..."
 		return m, m.loadHistory()
 	case "P":
+		if m.showPlaylists {
+			m.showPlaylists = false
+			if m.view == "main" {
+				m.selectedIdx = m.mainSelected
+				m.scrollIdx = m.mainScroll
+			} else {
+				m.selectedIdx = 0
+				m.scrollIdx = 0
+			}
+			m.mode = "normal"
+			return m, nil
+		}
 		if m.view == "main" {
 			m.mainSelected = m.selectedIdx
 			m.mainScroll = m.scrollIdx
@@ -668,6 +730,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+	case "y":
+		if len(m.videos) > 0 && m.selectedIdx < len(m.videos) {
+			video := m.videos[m.selectedIdx]
+			url := video.URL
+			if url == "" {
+				url = "https://www.youtube.com/watch?v=" + video.ID
+			}
+			cmd := exec.Command("sh", "-c", fmt.Sprintf("echo '%s' | xclip -selection clipboard 2>/dev/null || echo '%s' | pbcopy 2>/dev/null || echo '%s' | wl-copy 2>/dev/null", url, url, url))
+			err := cmd.Run()
+			if err == nil {
+				m.statusMsg = "URL copied to clipboard"
+			} else {
+				m.statusMsg = "Failed to copy (install xclip/pbcopy/wl-copy)"
+			}
+			return m, tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -706,34 +787,25 @@ func (m *Model) fixScroll() {
 
 func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "p":
+		if m.playerCmd != nil && m.playerCmd.Process != nil {
+			m.togglePause()
+		}
+		return m, nil
 	case "enter":
-		if m.selectedIdx < len(m.playlists)+2 {
-			if m.selectedIdx == 0 {
-				m.view = "history"
-				m.videos = []youtube.Video{}
-				m.showPlaylists = false
-				m.loading = true
-				m.loadingText = "Loading history..."
-				return m, m.loadHistory()
-			} else if m.selectedIdx == 1 {
-				m.showPlaylists = false
-				return m, nil
-			}
-			idx := m.selectedIdx - 2
-			if idx < len(m.playlists) {
-				playlistName := m.playlists[idx]
-				m.currentPlaylist = playlistName
-				videos, _ := m.store.GetPlaylist(playlistName)
-				m.videos = videos
-				m.selectedIdx = 0
-				m.scrollIdx = 0
-				m.mode = "normal"
-				m.showPlaylists = false
-				m.view = "playlist"
-			}
+		if m.selectedIdx < len(m.playlists) {
+			playlistName := m.playlists[m.selectedIdx]
+			m.currentPlaylist = playlistName
+			videos, _ := m.store.GetPlaylist(playlistName)
+			m.videos = videos
+			m.selectedIdx = 0
+			m.scrollIdx = 0
+			m.mode = "normal"
+			m.showPlaylists = false
+			m.view = "playlist"
 		}
 	case "j", "down":
-		if m.selectedIdx < len(m.playlists)+1 {
+		if m.selectedIdx < len(m.playlists)-1 {
 			m.selectedIdx++
 			m.fixScroll()
 		}
@@ -742,7 +814,7 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectedIdx--
 			m.fixScroll()
 		}
-	case "h", "q":
+	case "h", "q", "esc", "P":
 		m.showPlaylists = false
 		if m.view == "main" {
 			m.selectedIdx = m.mainSelected
@@ -975,11 +1047,13 @@ func (m *Model) helpView() string {
   s:           Stop current song
   c:           Toggle captions/subtitles (while playing)
   t:           Toggle transcript view (while playing)
+  y:           Copy URL to clipboard
   *:           Toggle Favorite
   dd:          Delete item
   Ctrl+L:      Clear list (History/Favorit)
   i/ /:        Search mode
-  H/P:         Playlists / History
+  H:           Toggle History
+  P:           Toggle Playlists menu
   ?:           Show/hide help
   q/esc:       Back / Normal mode / Quit
   Ctrl+C:      Force Quit
@@ -1082,9 +1156,6 @@ func (m *Model) playlistsView() string {
 	lines = append(lines, secondaryStyle.Render("Select a playlist:"))
 	lines = append(lines, "")
 
-	items := []string{"View History", "Back"}
-	items = append(items, m.playlists...)
-
 	offset := 15
 	if m.height < offset+2 {
 		offset = m.height - 2
@@ -1098,7 +1169,7 @@ func (m *Model) playlistsView() string {
 		maxHeight = 1
 	}
 
-	for i, p := range items {
+	for i, p := range m.playlists {
 		if i < m.scrollIdx || i >= m.scrollIdx+maxHeight {
 			continue
 		}
@@ -1107,17 +1178,12 @@ func (m *Model) playlistsView() string {
 		} else {
 			lines = append(lines, normalStyle.Render("  "+p))
 		}
-		if i >= 2 {
-			idx := i - 2
-			if idx < len(m.playlists) {
-				videos, _ := m.store.GetPlaylist(m.playlists[idx])
-				lines = append(lines, secondaryStyle.Render(fmt.Sprintf("    %d videos", len(videos))))
-			}
-		}
+		videos, _ := m.store.GetPlaylist(p)
+		lines = append(lines, secondaryStyle.Render(fmt.Sprintf("    %d videos", len(videos))))
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, secondaryStyle.Render("q/h: back  j/k: navigate  Enter: select"))
+	lines = append(lines, secondaryStyle.Render("P/q/h/esc: back  j/k: navigate  Enter: select"))
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1148,11 +1214,16 @@ func (m *Model) searchVideos(query string) tea.Cmd {
 
 func (m *Model) playVideo(video youtube.Video) tea.Cmd {
 	return func() tea.Msg {
-		url, err := youtube.GetStreamURL(video.URL)
+		url := video.URL
+		if url == "" {
+			url = "https://www.youtube.com/watch?v=" + video.ID
+		}
+
+		_, err := youtube.GetStreamURL(url)
 		if err != nil {
 			return playResultMsg{url: "", video: video, err: err}
 		}
-		url = strings.TrimSpace(url)
+
 		return playResultMsg{url: url, video: video, err: nil}
 	}
 }
