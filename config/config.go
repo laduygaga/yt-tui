@@ -6,9 +6,10 @@ import (
 )
 
 type Config struct {
-	DataDir    string
-	Player     string
-	MaxResults int
+	DataDir       string
+	Player        string
+	MaxResults    int
+	ChromeProfile string
 }
 
 func Load() *Config {
@@ -30,8 +31,9 @@ func Load() *Config {
 	os.MkdirAll(dataDir, 0755)
 
 	return &Config{
-		DataDir:    dataDir,
-		Player:     "mpv",
-		MaxResults: 20,
+		DataDir:       dataDir,
+		Player:        "mpv",
+		MaxResults:    20,
+		ChromeProfile: os.Getenv("YT_TUI_CHROME_PROFILE"),
 	}
 }

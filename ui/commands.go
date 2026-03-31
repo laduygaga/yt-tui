@@ -49,7 +49,7 @@ func (m *Model) playVideo(video youtube.Video) tea.Cmd {
 			url = "https://www.youtube.com/watch?v=" + video.ID
 		}
 
-		streamURL, err := youtube.GetStreamURL(url)
+		streamURL, err := youtube.GetStreamURL(url, m.cfg.ChromeProfile)
 		if err != nil {
 			return playResultMsg{url: "", video: video, err: err}
 		}

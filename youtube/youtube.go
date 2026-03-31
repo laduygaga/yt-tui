@@ -80,27 +80,70 @@ func Search(query string, maxResults int) ([]Video, error) {
 	return videos, nil
 }
 
-func GetStreamURL(videoURL string) (string, error) {
+func GetStreamURL(videoURL string, chromeProfile string) (string, error) {
 	args := []string{
 		"--no-check-certificate",
+		"--no-warnings",
+		"--no-playlist",
 		"-f", "bestaudio/best",
-		"-g",
-		"--user-agent", userAgent,
-		"--add-header", "Accept-Language:en-US,en;q=0.9",
-		"--extractor-retries", "3",
-		"--", videoURL,
+		"--print", "%(url)s",
 	}
+
+	if chromeProfile != "" {
+		args = append(args, "--cookies-from-browser", fmt.Sprintf("chrome:%s", chromeProfile))
+	}
+
+	args = append(args, "--", videoURL)
 
 	cmd := exec.Command("yt-dlp", args...)
 	output, err := cmd.Output()
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("yt-dlp error: %s", string(exitError.Stderr))
+	if err == nil {
+		url := strings.TrimSpace(string(output))
+		if url != "" {
+			return url, nil
 		}
+	}
+
+	configs := []struct {
+		client string
+		skip   string
+	}{
+		{"android_vr", "webpage,consent"},
+		{"mediaconnect", "webpage,consent"},
+		{"tv", "webpage,consent"},
+	}
+
+	for _, cfg := range configs {
+		args := []string{
+			"--no-check-certificate",
+			"--no-warnings",
+			"--no-playlist",
+			"-f", "bestaudio/best",
+			"--print", "%(url)s",
+			"--extractor-args", fmt.Sprintf("youtube:player_client=%s;player_skip=%s", cfg.client, cfg.skip),
+			"--", videoURL,
+		}
+
+		cmd := exec.Command("yt-dlp", args...)
+		output, err := cmd.Output()
+		if err == nil {
+			url := strings.TrimSpace(string(output))
+			if url != "" {
+				return url, nil
+			}
+		}
+
+		if exitError, ok := err.(*exec.ExitError); ok {
+			if cfg.client == configs[len(configs)-1].client {
+				return "", fmt.Errorf("yt-dlp error: %s", string(exitError.Stderr))
+			}
+			continue
+		}
+
 		return "", fmt.Errorf("yt-dlp error: %w", err)
 	}
 
-	return strings.TrimSpace(string(output)), nil
+	return "", fmt.Errorf("yt-dlp error: all methods failed")
 }
 
 func GetTranscript(videoID string) (*Transcript, error) {
