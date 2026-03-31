@@ -29,6 +29,29 @@ go build -o yt-tui main.go
 ./yt-tui
 ```
 
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `YT_TUI_DIR` | Custom data directory path |
+| `YT_TUI_CHROME_PROFILE` | Chrome profile to load cookies from (e.g. `Profile 11`). Required for stream extraction due to YouTube bot detection. Without this, playback uses a fallback method that may be slower or fail. |
+
+To find your Chrome profile names:
+
+```bash
+ls ~/.config/google-chrome/
+# Output: Default  Profile 1  Profile 2  ...
+```
+
+Then set the variable:
+
+```bash
+export YT_TUI_CHROME_PROFILE="Profile 11"
+./yt-tui
+```
+
+> **Note**: When using cookies, YouTube will record watch history for the signed-in account. Use a profile not signed into YouTube to avoid this.
+
 ## Keybindings
 
 ### Global Controls
@@ -62,11 +85,7 @@ go build -o yt-tui main.go
 
 ## Data Storage
 
-By default, data is stored in `~/.yt-tui/`. The application respects the following environment variables for data location:
-
-1. `YT_TUI_DIR`
-2. `XDG_CONFIG_HOME/yt-tui`
-3. `~/.yt-tui` (fallback)
+By default, data is stored in `~/.yt-tui/`. Override with `YT_TUI_DIR` or `XDG_CONFIG_HOME`.
 
 ## License
 
