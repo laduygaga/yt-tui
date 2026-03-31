@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 )
+
+const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 type TranscriptLine struct {
 	Text     string  `json:"text"`
@@ -33,18 +34,14 @@ type Video struct {
 	Thumbnail   string      `json:"thumbnail"`
 	Description string      `json:"description"`
 	URL         string      `json:"url"`
-	Transcript  *Transcript `json:"-"` // Don't serialize to JSON
-}
-
-type SearchResult struct {
-	Videos []Video
+	Transcript  *Transcript `json:"-"`
 }
 
 func Search(query string, maxResults int) ([]Video, error) {
 	args := []string{
 		"--no-check-certificate",
 		"--flat-playlist",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"--user-agent", userAgent,
 		"--print", "%(id)s|%(title)s|%(channel)s|%(duration)s|%(view_count)s|%(upload_date)s|%(thumbnail)s|%(description)s|%(url)s",
 		"--", fmt.Sprintf("ytsearch%d:%s", maxResults, query),
 	}
@@ -83,48 +80,12 @@ func Search(query string, maxResults int) ([]Video, error) {
 	return videos, nil
 }
 
-func GetVideoInfo(videoID string) (*Video, error) {
-	args := []string{
-		"--print", "%(id)s|%(title)s|%(channel)s|%(duration)s|%(view_count)s|%(upload_date)s|%(thumbnail)s|%(description)s|%(url)s",
-		"--", videoID,
-	}
-
-	cmd := exec.Command("yt-dlp", args...)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("yt-dlp error: %w", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, "|")
-		if len(parts) >= 9 {
-			return &Video{
-				ID:          parts[0],
-				Title:       parts[1],
-				Channel:     parts[2],
-				Duration:    parts[3],
-				Views:       parts[4],
-				Uploaded:    parts[5],
-				Thumbnail:   parts[6],
-				Description: parts[7],
-				URL:         parts[8],
-			}, nil
-		}
-	}
-
-	return nil, fmt.Errorf("video not found")
-}
-
 func GetStreamURL(videoURL string) (string, error) {
 	args := []string{
 		"--no-check-certificate",
 		"-f", "bestaudio/best",
 		"-g",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"--user-agent", userAgent,
 		"--add-header", "Accept-Language:en-US,en;q=0.9",
 		"--extractor-retries", "3",
 		"--", videoURL,
@@ -139,20 +100,7 @@ func GetStreamURL(videoURL string) (string, error) {
 		return "", fmt.Errorf("yt-dlp error: %w", err)
 	}
 
-	return string(output), nil
-}
-
-func Trending() ([]Video, error) {
-	return Search("trending", 20)
-}
-
-type HistoryItem struct {
-	Video     Video
-	WatchedAt time.Time
-}
-
-func SaveWatchHistory(video Video) error {
-	return nil
+	return strings.TrimSpace(string(output)), nil
 }
 
 func GetTranscript(videoID string) (*Transcript, error) {
@@ -235,60 +183,4 @@ func parseJSON3Transcript(videoID string, data []byte) (*Transcript, error) {
 		Lines:   lines,
 		Lang:    "en",
 	}, nil
-}
-
-func parseVTTTranscript(videoID string, data []byte) (*Transcript, error) {
-	lines := strings.Split(string(data), "\n")
-	var transcript []TranscriptLine
-
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		if strings.Contains(line, "-->") {
-			parts := strings.Split(line, "-->")
-			if len(parts) == 2 {
-				startStr := strings.TrimSpace(parts[0])
-				start := vttTimeToSeconds(startStr)
-
-				if i+1 < len(lines) {
-					text := strings.TrimSpace(lines[i+1])
-					if text != "" && !strings.Contains(text, "-->") {
-						transcript = append(transcript, TranscriptLine{
-							Text:     text,
-							Start:    start,
-							Duration: 0.5,
-						})
-					}
-				}
-			}
-		}
-	}
-
-	if len(transcript) == 0 {
-		return nil, fmt.Errorf("no transcript lines found in VTT")
-	}
-
-	return &Transcript{
-		VideoID: videoID,
-		Lines:   transcript,
-		Lang:    "en",
-	}, nil
-}
-
-func vttTimeToSeconds(timeStr string) float64 {
-	timeStr = strings.ReplaceAll(timeStr, ",", ".")
-	parts := strings.Split(timeStr, ":")
-	if len(parts) != 3 {
-		return 0
-	}
-
-	hours := parseFloat(parts[0])
-	minutes := parseFloat(parts[1])
-	seconds := parseFloat(parts[2])
-
-	return hours*3600 + minutes*60 + seconds
-}
-
-func parseFloat(s string) float64 {
-	f, _ := strconv.ParseFloat(s, 64)
-	return f
 }
