@@ -11,7 +11,11 @@ import (
 
 func main() {
 	cfg := config.Load()
-	store := storage.New(cfg)
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
+		os.Exit(1)
+	}
 
 	if err := ui.Run(cfg, store); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running app: %v\n", err)

@@ -23,13 +23,14 @@ type Storage struct {
 	transcriptDir string
 }
 
-func New(cfg *config.Config) *Storage {
-	return &Storage{
+func New(cfg *config.Config) (*Storage, error) {
+	s := &Storage{
 		config:        cfg,
 		historyFile:   filepath.Join(cfg.DataDir, "history.json"),
 		playlistDir:   filepath.Join(cfg.DataDir, "playlists"),
 		transcriptDir: filepath.Join(cfg.DataDir, "transcripts"),
 	}
+	return s, s.init()
 }
 
 func (s *Storage) init() error {
@@ -51,8 +52,6 @@ func (s *Storage) init() error {
 }
 
 func (s *Storage) AddToHistory(video youtube.Video) error {
-	s.init()
-
 	history, err := s.GetHistory()
 	if err != nil {
 		history = []HistoryItem{}
@@ -83,8 +82,6 @@ func (s *Storage) AddToHistory(video youtube.Video) error {
 }
 
 func (s *Storage) GetHistory() ([]HistoryItem, error) {
-	s.init()
-
 	data, err := os.ReadFile(s.historyFile)
 	if err != nil {
 		absPath, _ := filepath.Abs(s.historyFile)
@@ -101,13 +98,10 @@ func (s *Storage) GetHistory() ([]HistoryItem, error) {
 }
 
 func (s *Storage) ClearHistory() error {
-	s.init()
 	return os.WriteFile(s.historyFile, []byte("[]"), 0644)
 }
 
 func (s *Storage) RemoveFromHistory(index int) error {
-	s.init()
-
 	history, err := s.GetHistory()
 	if err != nil {
 		return err
@@ -128,7 +122,6 @@ func (s *Storage) RemoveFromHistory(index int) error {
 }
 
 func (s *Storage) CreatePlaylist(name string) error {
-	s.init()
 	path := filepath.Join(s.playlistDir, name+".json")
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("playlist already exists")
@@ -137,7 +130,6 @@ func (s *Storage) CreatePlaylist(name string) error {
 }
 
 func (s *Storage) AddToPlaylist(playlistName string, video youtube.Video) error {
-	s.init()
 	path := filepath.Join(s.playlistDir, playlistName+".json")
 
 	var videos []youtube.Video
@@ -157,7 +149,6 @@ func (s *Storage) AddToPlaylist(playlistName string, video youtube.Video) error 
 }
 
 func (s *Storage) GetPlaylist(name string) ([]youtube.Video, error) {
-	s.init()
 	path := filepath.Join(s.playlistDir, name+".json")
 
 	data, err := os.ReadFile(path)
@@ -174,7 +165,6 @@ func (s *Storage) GetPlaylist(name string) ([]youtube.Video, error) {
 }
 
 func (s *Storage) ListPlaylists() ([]string, error) {
-	s.init()
 	files, err := os.ReadDir(s.playlistDir)
 	if err != nil {
 		return nil, err
@@ -191,7 +181,6 @@ func (s *Storage) ListPlaylists() ([]string, error) {
 }
 
 func (s *Storage) RemoveFromPlaylist(playlistName string, index int) error {
-	s.init()
 	path := filepath.Join(s.playlistDir, playlistName+".json")
 
 	videos, err := s.GetPlaylist(playlistName)
@@ -214,7 +203,6 @@ func (s *Storage) RemoveFromPlaylist(playlistName string, index int) error {
 }
 
 func (s *Storage) ToggleFavorite(video youtube.Video) (bool, error) {
-	s.init()
 	playlistName := "favorit"
 	path := filepath.Join(s.playlistDir, playlistName+".json")
 
@@ -246,19 +234,16 @@ func (s *Storage) ToggleFavorite(video youtube.Video) (bool, error) {
 }
 
 func (s *Storage) ClearPlaylist(name string) error {
-	s.init()
 	path := filepath.Join(s.playlistDir, name+".json")
 	return os.WriteFile(path, []byte("[]"), 0644)
 }
 
 func (s *Storage) DeletePlaylist(name string) error {
-	s.init()
 	path := filepath.Join(s.playlistDir, name+".json")
 	return os.Remove(path)
 }
 
 func (s *Storage) SaveTranscript(transcript *youtube.Transcript) error {
-	s.init()
 	path := filepath.Join(s.transcriptDir, transcript.VideoID+".json")
 	data, err := json.MarshalIndent(transcript, "", "  ")
 	if err != nil {
@@ -268,7 +253,6 @@ func (s *Storage) SaveTranscript(transcript *youtube.Transcript) error {
 }
 
 func (s *Storage) GetTranscript(videoID string) (*youtube.Transcript, error) {
-	s.init()
 	path := filepath.Join(s.transcriptDir, videoID+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
