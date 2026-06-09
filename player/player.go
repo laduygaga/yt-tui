@@ -213,10 +213,9 @@ func (p *Player) syncLoop() {
 
 		p.mu.Lock()
 		isPlaying := p.state.IsPlaying
-		isPaused := p.state.IsPaused
 		p.mu.Unlock()
 
-		if !isPlaying || isPaused {
+		if !isPlaying {
 			time.Sleep(syncInterval)
 			continue
 		}

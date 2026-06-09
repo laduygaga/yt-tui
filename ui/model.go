@@ -67,7 +67,6 @@ type Model struct {
 	confirmQuit         bool
 }
 
-type progressMsg float64
 type syncTimeMsg struct {
 	Current float64
 	Total   float64
@@ -76,12 +75,15 @@ type clearStatusMsg struct{}
 type songEndedMsg struct{}
 
 func (m *Model) tickProgress() tea.Cmd {
-	return tea.Tick(statusTimeoutShort, func(t time.Time) tea.Msg {
-		if !m.player.IsPlaying() || m.player.IsPaused() {
+	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
+		if !m.player.IsPlaying() {
 			return nil
 		}
-
-		return progressMsg(1.0)
+		state := m.player.GetState()
+		return syncTimeMsg{
+			Current: state.CurrentTime,
+			Total:   state.TotalTime,
+		}
 	})
 }
 
@@ -130,7 +132,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentTime > m.totalTime {
 			m.currentTime = m.totalTime
 		}
-		return m, nil
+		return m, m.tickProgress()
 	case clearStatusMsg:
 		m.statusMsg = ""
 		m.confirmQuit = false
@@ -181,15 +183,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(statusTimeoutShort, func(t time.Time) tea.Msg {
 				return clearStatusMsg{}
 			})
-		}
-		return m, nil
-	case progressMsg:
-		if m.player.IsPlaying() && !m.player.IsPaused() {
-			m.currentTime += float64(msg)
-			if m.currentTime > m.totalTime {
-				m.currentTime = m.totalTime
-			}
-			return m, m.tickProgress()
 		}
 		return m, nil
 	case songEndedMsg:
