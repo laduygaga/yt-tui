@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -94,6 +95,7 @@ func (p *Player) Start(url string, playerCmd string, onEnded func()) error {
 
 	p.cmd = exec.Command(playerCmd, "--no-video", "--no-input-terminal", "--no-terminal", "--quiet",
 		fmt.Sprintf("--input-ipc-server=%s", p.socketPath), url)
+	p.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := p.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start player: %w", err)

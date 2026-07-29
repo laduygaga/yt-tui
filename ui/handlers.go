@@ -73,6 +73,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		m.player.Stop()
 		return m, tea.Quit
+	case "ctrl+z":
+		return m, tea.Suspend
 	case "ctrl+l":
 		if m.view == "history" {
 			m.store.ClearHistory()

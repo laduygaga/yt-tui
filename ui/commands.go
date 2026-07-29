@@ -101,7 +101,7 @@ func (m *Model) loadTranscript(videoID string) tea.Cmd {
 
 func Run(cfg *config.Config, store *storage.Storage) error {
 	m := New(cfg, store)
-	p := tea.NewProgram(m, tea.WithOutput(nil))
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	m.program = p
 	if _, err := p.Run(); err != nil {
 		return err
