@@ -7,6 +7,38 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var (
+	helpStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(cyan).
+			Padding(1)
+
+	transcriptStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(cyan).
+			Padding(1)
+
+	playlistBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(gray).
+			Padding(1)
+
+	mainBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(gray).
+			Padding(0, 1)
+
+	yellowStyle = lipgloss.NewStyle().Foreground(yellow)
+	greenStyle  = lipgloss.NewStyle().Foreground(green)
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	cyanAlignCenterWidth = lipgloss.NewStyle().
+				Foreground(cyan).
+				Align(lipgloss.Center)
+	dimAlignCenterWidth = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Align(lipgloss.Center)
+)
+
 func (m *Model) View() string {
 	if m.showHelp {
 		return m.helpView()
@@ -18,6 +50,47 @@ func (m *Model) View() string {
 		return m.transcriptView()
 	}
 
+	content := m.mainContent()
+
+	var statusBar string
+	isPlayerActive := m.player.IsPlaying()
+	if (isPlayerActive || m.totalTime > 0) && m.nowPlaying != "" {
+		statusBar = m.playbackStatusBar(isPlayerActive)
+	} else if m.loading {
+		statusBar = statusStyle.Render("» " + m.loadingText)
+	} else {
+		modeStr := "-- NORMAL --"
+		if m.mode == "insert" {
+			modeStr = "-- INSERT --"
+		}
+		statusBar = normalStyle.Render(modeStr + " j/k: navigate  h/l: seek  [/]: speed  p: pause  s: stop  ?: help  esc: quit")
+	}
+
+	if m.statusMsg != "" {
+		statusBar = statusBar + "\n" + yellowStyle.Render("» "+m.statusMsg)
+	}
+
+	if m.nowPlaying != "" && m.showSubtitles {
+		subtitle := m.subtitleSection()
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			content,
+			"",
+			subtitle,
+			"",
+			statusBar,
+		)
+	}
+
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		content,
+		"",
+		statusBar,
+	)
+}
+
+func (m *Model) mainContent() string {
 	var mainContent string
 	var details string
 
@@ -39,134 +112,89 @@ func (m *Model) View() string {
 		details = m.detailsView()
 	}
 
-	layout := mainContent
-	if details != "" {
-		layout = lipgloss.JoinVertical(
-			lipgloss.Left,
-			mainContent,
-			details,
-		)
+	if details == "" {
+		return m.renderBordered(mainContent)
 	}
+	return m.renderBordered(lipgloss.JoinVertical(lipgloss.Left, mainContent, details))
+}
 
-	border := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(gray).
-		Padding(0, 1)
-
+func (m *Model) renderBordered(content string) string {
+	border := mainBorder
 	if m.width > 0 {
 		border = border.Width(m.width - borderPadding)
 	}
-
-	content := border.Render(
+	return border.Render(
 		lipgloss.JoinVertical(
 			lipgloss.Left,
 			titleStyle.Render("YouTube TUI"+getTitleSuffix(m)),
-			layout,
+			content,
 		),
 	)
+}
 
-	var statusBar string
-	isPlayerActive := m.player.IsPlaying()
-	if (isPlayerActive || m.totalTime > 0) && m.nowPlaying != "" {
-		status := "▶ Playing: "
-		if !isPlayerActive && m.totalTime > 0 {
-			status = "■ Stopped: "
-		} else if m.player.IsPaused() {
-			status = "⏸ Paused: "
-		}
-		if m.player.IsLooping() {
-			status += "🔁 "
-		}
-
-		var progressStr string
-		if m.totalTime > 0 {
-			pct := m.currentTime / m.totalTime
-			if pct > 1 {
-				pct = 1
-			}
-			m.progress.Width = m.width - 20
-			if m.progress.Width < 20 {
-				m.progress.Width = 20
-			}
-			timeStr := fmt.Sprintf(" %s / %s", formatTime(m.currentTime), formatTime(m.totalTime))
-			if m.playbackSpeed != defaultSpeed {
-				timeStr += fmt.Sprintf(" [%.2fx]", m.playbackSpeed)
-			}
-			progressStr = "\n" + m.progress.ViewAs(pct) + timeStr
-		} else if m.currentTime > 0 {
-			timeStr := fmt.Sprintf(" %s / --:-- (Loading duration...)", formatTime(m.currentTime))
-			if m.playbackSpeed != defaultSpeed {
-				timeStr += fmt.Sprintf(" [%.2fx]", m.playbackSpeed)
-			}
-			progressStr = "\n" + timeStr
-		}
-
-		statusBar = lipgloss.NewStyle().Foreground(green).Render(status) + normalStyle.Render(m.nowPlaying) + progressStr
-	} else if m.loading {
-		statusBar = statusStyle.Render("» " + m.loadingText)
-	} else {
-		modeStr := "-- NORMAL --"
-		if m.mode == "insert" {
-			modeStr = "-- INSERT --"
-		}
-		statusBar = normalStyle.Render(modeStr + " j/k: navigate  h/l: seek  [/]: speed  p: pause  s: stop  ?: help  esc: quit")
+func (m *Model) playbackStatusBar(isPlayerActive bool) string {
+	snap := m.player.Snapshot()
+	status := "▶ Playing: "
+	if !isPlayerActive && m.totalTime > 0 {
+		status = "■ Stopped: "
+	} else if snap.IsPaused {
+		status = "⏸ Paused: "
+	}
+	if snap.IsLooping {
+		status += "🔁 "
 	}
 
-	if m.statusMsg != "" {
-		statusBar = statusBar + "\n" + lipgloss.NewStyle().Foreground(yellow).Render("» "+m.statusMsg)
-	}
+	progressStr := m.progressStr()
+	return greenStyle.Render(status) + normalStyle.Render(m.nowPlaying) + progressStr
+}
 
-	var subtitleSection string
-	var hasSubtitleSection bool
-	if m.nowPlaying != "" && m.showSubtitles {
-		hasSubtitleSection = true
-		if m.transcript == nil {
-			subtitleSection = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("8")).
-				Width(m.width - borderPadding).
-				Align(lipgloss.Center).
-				Render("[Loading subtitles...]")
-		} else if len(m.transcript.Lines) == 0 {
-			subtitleSection = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("8")).
-				Width(m.width - borderPadding).
-				Align(lipgloss.Center).
-				Render("[No subtitles available]")
-		} else {
-			currentSub := m.getCurrentSubtitle()
-			if currentSub != "" {
-				subText := "▼ " + currentSub
-				if len(subText) > m.width-10 {
-					subText = subText[:m.width-13] + "..."
-				}
-				subtitleSection = lipgloss.NewStyle().
-					Foreground(cyan).
-					Width(m.width - borderPadding).
-					Align(lipgloss.Center).
-					Render(subText)
-			} else {
-				subtitleSection = " "
-			}
+func (m *Model) progressStr() string {
+	if m.totalTime > 0 {
+		pct := m.currentTime / m.totalTime
+		if pct > 1 {
+			pct = 1
 		}
+		width := m.width - 20
+		if width < 20 {
+			width = 20
+		}
+		if m.progressWidthSet != width {
+			m.progress.Width = width
+			m.progressWidthSet = width
+		}
+		timeStr := fmt.Sprintf(" %s / %s", formatTime(m.currentTime), formatTime(m.totalTime))
+		if m.playbackSpeed != defaultSpeed {
+			timeStr += fmt.Sprintf(" [%.2fx]", m.playbackSpeed)
+		}
+		return "\n" + m.progress.ViewAs(pct) + timeStr
 	}
-
-	if hasSubtitleSection {
-		return lipgloss.JoinVertical(
-			lipgloss.Left,
-			content,
-			"",
-			subtitleSection,
-			"",
-			statusBar,
-		)
+	if m.currentTime > 0 {
+		timeStr := fmt.Sprintf(" %s / --:-- (Loading duration...)", formatTime(m.currentTime))
+		if m.playbackSpeed != defaultSpeed {
+			timeStr += fmt.Sprintf(" [%.2fx]", m.playbackSpeed)
+		}
+		return "\n" + timeStr
 	}
+	return ""
+}
 
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		content,
-		"",
-		statusBar,
-	)
+func (m *Model) subtitleSection() string {
+	width := m.width - borderPadding
+	if m.transcript == nil {
+		return dimAlignCenterWidth.Width(width).Render("[Loading subtitles...]")
+	}
+	if len(m.transcript.Lines) == 0 {
+		return dimAlignCenterWidth.Width(width).Render("[No subtitles available]")
+	}
+	currentSub := m.getCurrentSubtitle()
+	if currentSub == "" {
+		return " "
+	}
+	subText := "▼ " + currentSub
+	if len(subText) > m.width-10 {
+		subText = subText[:m.width-13] + "..."
+	}
+	return cyanAlignCenterWidth.Width(width).Render(subText)
 }
 
 func (m *Model) transcriptView() string {
@@ -208,11 +236,7 @@ func (m *Model) transcriptView() string {
 		lines = append(lines, secondaryStyle.Render(fmt.Sprintf("... %d more lines (j to scroll)", len(m.transcript.Lines)-endIdx)))
 	}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(cyan).
-		Padding(1).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return transcriptStyle.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 func (m *Model) helpView() string {
@@ -242,17 +266,18 @@ func (m *Model) helpView() string {
   q/esc:       Back / Normal mode / Quit
   Ctrl+C:      Force Quit
 `
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(cyan).
-		Padding(1).
-		Render(help)
+	return helpStyle.Render(help)
 }
 
 func (m *Model) videoListView() string {
 	if len(m.videos) == 0 {
+		if m.loading {
+			return statusStyle.Render("» " + m.loadingText)
+		}
 		return normalStyle.Render("No videos in current list")
 	}
+
+	m.ensureTruncationCache()
 
 	var content strings.Builder
 
@@ -276,8 +301,8 @@ func (m *Model) videoListView() string {
 
 	for i := m.scrollIdx; i < endIdx; i++ {
 		v := m.videos[i]
-		title := truncate(v.Title, m.width-10)
-		desc := fmt.Sprintf("%s | %s", formatDuration(v.Duration), v.Channel)
+		title := m.cachedTitles[i]
+		desc := m.formattedDur[i] + " | " + v.Channel
 
 		if i == m.selectedIdx {
 			content.WriteString(selectedStyle.Render("▶ " + title))
@@ -304,7 +329,9 @@ func (m *Model) detailsView() string {
 	if len(m.videos) == 0 || m.selectedIdx >= len(m.videos) {
 		return ""
 	}
-	v := m.videos[m.selectedIdx]
+	idx := m.selectedIdx
+	v := m.videos[idx]
+	m.ensureTruncationCache()
 
 	width := m.width - 10
 	if width < 10 {
@@ -312,13 +339,13 @@ func (m *Model) detailsView() string {
 	}
 
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n\n%s\n%s",
-		titleStyle.Render("Title:")+" "+normalStyle.Render(truncate(v.Title, width)),
+		titleStyle.Render("Title:")+" "+normalStyle.Render(m.cachedTitles[idx]),
 		titleStyle.Render("Channel:")+" "+normalStyle.Render(truncate(v.Channel, width)),
-		titleStyle.Render("Duration:")+" "+normalStyle.Render(formatDuration(v.Duration)),
-		titleStyle.Render("Views:")+" "+normalStyle.Render(formatViews(v.Views)),
+		titleStyle.Render("Duration:")+" "+normalStyle.Render(m.formattedDur[idx]),
+		titleStyle.Render("Views:")+" "+normalStyle.Render(m.formattedViews[idx]),
 		titleStyle.Render("Uploaded:")+" "+normalStyle.Render(v.Uploaded),
 		titleStyle.Render("Description:"),
-		secondaryStyle.Render(truncate(v.Description, width*3)),
+		secondaryStyle.Render(m.cachedDesc[idx]),
 	)
 }
 
@@ -326,13 +353,25 @@ func (m *Model) getCurrentSubtitle() string {
 	if m.transcript == nil || len(m.transcript.Lines) == 0 {
 		return ""
 	}
-
-	for _, line := range m.transcript.Lines {
-		startTime := line.Start - subtitleStartOffset
-		endTime := line.Start + line.Duration + subtitleEndOffset
-		if m.currentTime >= startTime && m.currentTime < endTime {
-			return line.Text
+	lines := m.transcript.Lines
+	lo, hi := 0, len(lines)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if m.currentTime < lines[mid].Start {
+			hi = mid
+		} else {
+			lo = mid + 1
 		}
+	}
+	idx := lo - 1
+	if idx < 0 {
+		return ""
+	}
+	line := lines[idx]
+	startTime := line.Start - subtitleStartOffset
+	endTime := line.Start + line.Duration + subtitleEndOffset
+	if m.currentTime >= startTime && m.currentTime < endTime {
+		return line.Text
 	}
 	return ""
 }
@@ -373,11 +412,7 @@ func (m *Model) playlistsView() string {
 	lines = append(lines, "")
 	lines = append(lines, secondaryStyle.Render("P/q/h/esc: back  j/k: navigate  Enter: select"))
 
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(gray).
-		Padding(1)
-
+	style := playlistBorder
 	if m.width > 0 {
 		style = style.Width(m.width - borderPadding)
 	}

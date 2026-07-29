@@ -42,6 +42,8 @@ type Player struct {
 	socketPath    string
 	mu            sync.Mutex
 	state         State
+	snapshot      State
+	snapshotVer   uint64
 	cmd           *exec.Cmd
 	conn          net.Conn
 	decoder       *json.Decoder
@@ -83,9 +85,12 @@ func (p *Player) Start(url string, playerCmd string, onEnded func()) error {
 		IsLooping:     false,
 		PlaybackSpeed: 1.0,
 	}
+	p.updateSnapshotLocked()
 	p.onEnded = onEnded
 
-	os.Remove(p.socketPath)
+	if _, err := os.Stat(p.socketPath); err == nil {
+		os.Remove(p.socketPath)
+	}
 
 	p.cmd = exec.Command(playerCmd, "--no-video", "--no-input-terminal", "--no-terminal", "--quiet",
 		fmt.Sprintf("--input-ipc-server=%s", p.socketPath), url)
@@ -139,12 +144,14 @@ func (p *Player) Stop() {
 		CurrentTime:   0,
 		TotalTime:     0,
 	}
+	p.updateSnapshotLocked()
 }
 
 func (p *Player) TogglePause() error {
 	p.mu.Lock()
 	p.state.IsPaused = !p.state.IsPaused
 	paused := p.state.IsPaused
+	p.updateSnapshotLocked()
 	p.mu.Unlock()
 
 	return p.sendCommand(map[string]interface{}{
@@ -161,6 +168,7 @@ func (p *Player) Seek(seconds float64) error {
 func (p *Player) SetSpeed(speed float64) error {
 	p.mu.Lock()
 	p.state.PlaybackSpeed = speed
+	p.updateSnapshotLocked()
 	p.mu.Unlock()
 
 	return p.sendCommand(map[string]interface{}{
@@ -171,6 +179,7 @@ func (p *Player) SetSpeed(speed float64) error {
 func (p *Player) SetLoop(loop bool) error {
 	p.mu.Lock()
 	p.state.IsLooping = loop
+	p.updateSnapshotLocked()
 	p.mu.Unlock()
 
 	loopVal := "inf"
@@ -186,11 +195,29 @@ func (p *Player) SetLoop(loop bool) error {
 func (p *Player) SetPaused(paused bool) error {
 	p.mu.Lock()
 	p.state.IsPaused = paused
+	p.updateSnapshotLocked()
 	p.mu.Unlock()
 
 	return p.sendCommand(map[string]interface{}{
 		"command": []interface{}{"set_property", "pause", paused},
 	})
+}
+
+func (p *Player) Snapshot() State {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.snapshot
+}
+
+func (p *Player) SnapshotVersion() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.snapshotVer
+}
+
+func (p *Player) updateSnapshotLocked() {
+	p.snapshot = p.state
+	p.snapshotVer++
 }
 
 func (p *Player) GetState() State {
@@ -286,6 +313,7 @@ func (p *Player) syncLoop(cancel <-chan struct{}) {
 			if total > 0 {
 				p.state.TotalTime = total
 			}
+			p.updateSnapshotLocked()
 			p.mu.Unlock()
 		}
 

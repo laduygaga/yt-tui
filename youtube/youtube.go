@@ -105,7 +105,7 @@ func Search(query string, maxResults int) ([]Video, error) {
 }
 
 func GetStreamURL(videoURL string, chromeProfile string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	tryExtract := func(profile, client string) (string, error) {
@@ -124,7 +124,7 @@ func GetStreamURL(videoURL string, chromeProfile string) (string, error) {
 		}
 		args = append(args, "--", videoURL)
 
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 6*time.Second)
 		defer attemptCancel()
 
 		cmd := exec.CommandContext(attemptCtx, "yt-dlp", args...)

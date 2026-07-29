@@ -36,7 +36,7 @@ func (m *Model) searchVideos(query string) tea.Cmd {
 	m.scrollIdx = 0
 	m.mainSelected = 0
 	m.mainScroll = 0
-	m.videos = []youtube.Video{}
+	m.setVideos([]youtube.Video{})
 	m.playAttempt = 0
 	m.playStartTime = time.Time{}
 	return func() tea.Msg {

@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +67,15 @@ type Model struct {
 	confirmQuit         bool
 	playStartTime       time.Time
 	playAttempt         int
+	cachedView          string
+	viewVersion         uint64
+	formattedDur        []string
+	formattedViews      []string
+	progressWidthSet    int
+	playStateSnap       player.State
+	cachedWidth         int
+	cachedTitles        []string
+	cachedDesc          []string
 }
 
 type syncTimeMsg struct {
@@ -82,9 +90,13 @@ type playbackErrorMsg struct {
 }
 
 func (m *Model) tickProgress() tea.Cmd {
+	if !m.player.IsPlaying() {
+		return nil
+	}
+	ver := m.player.SnapshotVersion()
 	return tea.Tick(progressTickInterval, func(t time.Time) tea.Msg {
-		if !m.player.IsPlaying() {
-			return syncTimeMsg{}
+		if m.player.SnapshotVersion() == ver && !m.player.IsPlaying() {
+			return nil
 		}
 		state := m.player.GetState()
 		return syncTimeMsg{
@@ -146,7 +158,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case searchResultMsg:
 		m.loading = false
-		m.videos = msg.videos
+		m.setVideos(msg.videos)
 		if m.view == "main" {
 			m.mainVideos = msg.videos
 		}
@@ -236,6 +248,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) setVideos(videos []youtube.Video) {
+	m.videos = videos
+	m.formattedDur = make([]string, len(videos))
+	m.formattedViews = make([]string, len(videos))
+	for i, v := range videos {
+		m.formattedDur[i] = formatDuration(v.Duration)
+		m.formattedViews[i] = formatViews(v.Views)
+	}
+	m.cachedTitles = nil
+	m.cachedDesc = nil
+}
+
+func (m *Model) ensureTruncationCache() {
+	width := m.width - 10
+	if width < 10 {
+		width = 10
+	}
+	if m.cachedWidth == width && len(m.cachedTitles) == len(m.videos) {
+		return
+	}
+	m.cachedWidth = width
+	m.cachedTitles = make([]string, len(m.videos))
+	m.cachedDesc = make([]string, len(m.videos))
+	for i, v := range m.videos {
+		m.cachedTitles[i] = truncate(v.Title, width)
+		m.cachedDesc[i] = truncate(v.Description, width*3)
+	}
+}
+
 func (m *Model) shouldApplySyncTime(msg syncTimeMsg) bool {
 	current := msg.Current
 	if msg.Total > 0 && current > msg.Total {
@@ -297,63 +338,6 @@ func (m *Model) fixScroll() {
 	if m.scrollIdx < 0 {
 		m.scrollIdx = 0
 	}
-}
-
-func formatTime(seconds float64) string {
-	s := int(seconds)
-	h := s / 3600
-	m := (s % 3600) / 60
-	s = s % 60
-	if h > 0 {
-		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
-	}
-	return fmt.Sprintf("%02d:%02d", m, s)
-}
-
-func formatDuration(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "NA" {
-		return raw
-	}
-	seconds, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return raw
-	}
-	return formatTime(seconds)
-}
-
-func formatViews(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "NA" {
-		return raw
-	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return raw
-	}
-	negative := n < 0
-	if negative {
-		n = -n
-	}
-	s := strconv.FormatInt(n, 10)
-	var b strings.Builder
-	pre := len(s) % 3
-	if pre > 0 {
-		b.WriteString(s[:pre])
-		if len(s) > pre {
-			b.WriteByte(',')
-		}
-	}
-	for i := pre; i < len(s); i += 3 {
-		b.WriteString(s[i : i+3])
-		if i+3 < len(s) {
-			b.WriteByte(',')
-		}
-	}
-	if negative {
-		return "-" + b.String()
-	}
-	return b.String()
 }
 
 func parseDuration(duration string) float64 {

@@ -86,7 +86,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.view == "playlist" && m.currentPlaylist == "favorit" {
 			m.store.ClearPlaylist("favorit")
-			m.videos = []youtube.Video{}
+			m.setVideos([]youtube.Video{})
 			m.statusMsg = "Favorit cleared"
 			return m, tea.Tick(statusTimeoutShort, func(t time.Time) tea.Msg {
 				return clearStatusMsg{}
@@ -100,7 +100,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.view != "main" {
 			m.view = "main"
-			m.videos = m.mainVideos
+			m.setVideos(m.mainVideos)
 			m.selectedIdx = m.mainSelected
 			m.scrollIdx = m.mainScroll
 			if len(m.videos) == 0 {
@@ -237,7 +237,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 				if m.view == "playlist" && m.currentPlaylist == "favorit" {
 					videos, _ := m.store.GetPlaylist("favorit")
-					m.videos = videos
+					m.setVideos(videos)
 					if m.selectedIdx >= len(m.videos) && len(m.videos) > 0 {
 						m.selectedIdx = len(m.videos) - 1
 					}
@@ -252,7 +252,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "H":
 		if m.view == "history" {
 			m.view = "main"
-			m.videos = m.mainVideos
+			m.setVideos(m.mainVideos)
 			m.selectedIdx = m.mainSelected
 			m.scrollIdx = m.mainScroll
 			if len(m.videos) == 0 {
@@ -265,7 +265,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mainScroll = m.scrollIdx
 		}
 		m.view = "history"
-		m.videos = []youtube.Video{}
+		m.setVideos([]youtube.Video{})
 		m.loading = true
 		m.loadingText = "Loading history..."
 		return m, m.loadHistory()
@@ -379,7 +379,7 @@ func (m *Model) handlePlaylistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			playlistName := m.playlists[m.selectedIdx]
 			m.currentPlaylist = playlistName
 			videos, _ := m.store.GetPlaylist(playlistName)
-			m.videos = videos
+			m.setVideos(videos)
 			m.selectedIdx = 0
 			m.scrollIdx = 0
 			m.mode = "normal"
