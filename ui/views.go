@@ -203,23 +203,30 @@ func (m *Model) subtitleSection() string {
 		return " "
 	}
 
-	maxLen := m.width - 10
+	maxLen := m.width - 15
 	if maxLen < 10 {
 		maxLen = 10
+	}
+
+	primaryLang := "VI"
+	secondaryLang := "EN"
+	if m.transcript.Lang == "en" {
+		primaryLang = "EN"
+		secondaryLang = "VI"
 	}
 
 	if primary != "" {
 		if len(primary) > maxLen {
 			primary = primary[:maxLen-3] + "..."
 		}
-		primary = "▼ " + primary
+		primary = fmt.Sprintf("▼ [%s] %s", primaryLang, primary)
 	}
 
 	if secondary != "" {
 		if len(secondary) > maxLen {
 			secondary = secondary[:maxLen-3] + "..."
 		}
-		secondary = "  " + secondary
+		secondary = fmt.Sprintf("  ↳ [%s] %s", secondaryLang, secondary)
 		return m.cachedCyanStyle.Render(primary + "\n" + secondary)
 	}
 
@@ -245,22 +252,46 @@ func (m *Model) transcriptView() string {
 		endIdx = len(m.transcript.Lines)
 	}
 
+	primaryLang := "VI"
+	secondaryLang := "EN"
+	if m.transcript.Lang == "en" {
+		primaryLang = "EN"
+		secondaryLang = "VI"
+	}
+
 	for i := m.transcriptScrollIdx; i < endIdx; i++ {
 		line := m.transcript.Lines[i]
 		timeStr := formatTime(line.Start)
 		text := line.Text
-		if line.SecondaryText != "" {
-			text = text + " (" + line.SecondaryText + ")"
+		maxLen := m.width - 25
+		if maxLen < 10 {
+			maxLen = 10
 		}
-		if len(text) > m.width-15 {
-			text = text[:m.width-18] + "..."
+
+		if len(text) > maxLen {
+			text = text[:maxLen-3] + "..."
 		}
 
 		isCurrent := m.currentTime >= (line.Start-subtitleStartOffset) && m.currentTime < (line.Start+line.Duration+subtitleEndOffset)
+
+		primaryStr := fmt.Sprintf("[%s] [%s] %s", primaryLang, timeStr, text)
 		if isCurrent {
-			lines = append(lines, selectedStyle.Render(fmt.Sprintf("[%s] ▶ %s", timeStr, text)))
+			lines = append(lines, selectedStyle.Render("▶ "+primaryStr))
 		} else {
-			lines = append(lines, normalStyle.Render(fmt.Sprintf("[%s]   %s", timeStr, text)))
+			lines = append(lines, normalStyle.Render("  "+primaryStr))
+		}
+
+		if line.SecondaryText != "" {
+			secText := line.SecondaryText
+			if len(secText) > maxLen {
+				secText = secText[:maxLen-3] + "..."
+			}
+			secStr := fmt.Sprintf("    ↳ [%s] %s", secondaryLang, secText)
+			if isCurrent {
+				lines = append(lines, selectedStyle.Render(secStr))
+			} else {
+				lines = append(lines, secondaryStyle.Render(secStr))
+			}
 		}
 	}
 
