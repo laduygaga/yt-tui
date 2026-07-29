@@ -73,7 +73,7 @@ func (s *Storage) AddToHistory(video youtube.Video) error {
 		newHistory = newHistory[:100]
 	}
 
-	data, err := json.MarshalIndent(newHistory, "", "  ")
+	data, err := json.Marshal(newHistory)
 	if err != nil {
 		return err
 	}
@@ -113,7 +113,7 @@ func (s *Storage) RemoveFromHistory(index int) error {
 
 	history = append(history[:index], history[index+1:]...)
 
-	data, err := json.MarshalIndent(history, "", "  ")
+	data, err := json.Marshal(history)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (s *Storage) RemoveFromPlaylist(playlistName string, index int) error {
 
 	videos = append(videos[:index], videos[index+1:]...)
 
-	data, err := json.MarshalIndent(videos, "", "  ")
+	data, err := json.Marshal(videos)
 	if err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func (s *Storage) ToggleFavorite(video youtube.Video) (bool, error) {
 		added = true
 	}
 
-	data, err := json.MarshalIndent(videos, "", "  ")
+	data, err := json.Marshal(videos)
 	if err != nil {
 		return false, err
 	}
@@ -245,7 +245,7 @@ func (s *Storage) DeletePlaylist(name string) error {
 
 func (s *Storage) SaveTranscript(transcript *youtube.Transcript) error {
 	path := filepath.Join(s.transcriptDir, transcript.VideoID+".json")
-	data, err := json.MarshalIndent(transcript, "", "  ")
+	data, err := json.Marshal(transcript)
 	if err != nil {
 		return err
 	}

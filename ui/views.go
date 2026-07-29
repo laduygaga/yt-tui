@@ -118,12 +118,24 @@ func (m *Model) mainContent() string {
 	return m.renderBordered(lipgloss.JoinVertical(lipgloss.Left, mainContent, details))
 }
 
-func (m *Model) renderBordered(content string) string {
-	border := mainBorder
-	if m.width > 0 {
-		border = border.Width(m.width - borderPadding)
+func (m *Model) ensureWidthStyles() {
+	width := m.width - borderPadding
+	if width < 10 {
+		width = 10
 	}
-	return border.Render(
+	if m.cachedStyleWidth == width {
+		return
+	}
+	m.cachedStyleWidth = width
+	m.cachedMainBorder = mainBorder.Width(width)
+	m.cachedPlaylistBorder = playlistBorder.Width(width)
+	m.cachedDimStyle = dimAlignCenterWidth.Width(width)
+	m.cachedCyanStyle = cyanAlignCenterWidth.Width(width)
+}
+
+func (m *Model) renderBordered(content string) string {
+	m.ensureWidthStyles()
+	return m.cachedMainBorder.Render(
 		lipgloss.JoinVertical(
 			lipgloss.Left,
 			titleStyle.Render("YouTube TUI"+getTitleSuffix(m)),
@@ -179,12 +191,12 @@ func (m *Model) progressStr() string {
 }
 
 func (m *Model) subtitleSection() string {
-	width := m.width - borderPadding
+	m.ensureWidthStyles()
 	if m.transcript == nil {
-		return dimAlignCenterWidth.Width(width).Render("[Loading subtitles...]")
+		return m.cachedDimStyle.Render("[Loading subtitles...]")
 	}
 	if len(m.transcript.Lines) == 0 {
-		return dimAlignCenterWidth.Width(width).Render("[No subtitles available]")
+		return m.cachedDimStyle.Render("[No subtitles available]")
 	}
 	currentSub := m.getCurrentSubtitle()
 	if currentSub == "" {
@@ -194,7 +206,7 @@ func (m *Model) subtitleSection() string {
 	if len(subText) > m.width-10 {
 		subText = subText[:m.width-13] + "..."
 	}
-	return cyanAlignCenterWidth.Width(width).Render(subText)
+	return m.cachedCyanStyle.Render(subText)
 }
 
 func (m *Model) transcriptView() string {
@@ -412,10 +424,6 @@ func (m *Model) playlistsView() string {
 	lines = append(lines, "")
 	lines = append(lines, secondaryStyle.Render("P/q/h/esc: back  j/k: navigate  Enter: select"))
 
-	style := playlistBorder
-	if m.width > 0 {
-		style = style.Width(m.width - borderPadding)
-	}
-
-	return style.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	m.ensureWidthStyles()
+	return m.cachedPlaylistBorder.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }

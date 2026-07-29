@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -139,20 +140,37 @@ func GetStreamURL(videoURL string, chromeProfile string) (string, error) {
 		return url, nil
 	}
 
-	strategies := []struct {
+	var strategies []struct {
 		profile string
 		client  string
-	}{
-		{"", ""},
-		{"", "android_vr"},
-		{"", "tv_downgraded"},
-		{"", "mediaconnect"},
-		{"", "tv"},
-		{chromeProfile, ""},
-		{chromeProfile, "tv_downgraded"},
-		{chromeProfile, "android_vr"},
-		{chromeProfile, "mediaconnect"},
-		{chromeProfile, "tv"},
+	}
+	if chromeProfile != "" {
+		strategies = []struct {
+			profile string
+			client  string
+		}{
+			{chromeProfile, ""},
+			{chromeProfile, "tv_downgraded"},
+			{chromeProfile, "android_vr"},
+			{chromeProfile, "mediaconnect"},
+			{chromeProfile, "tv"},
+			{"", ""},
+			{"", "android_vr"},
+			{"", "tv_downgraded"},
+			{"", "mediaconnect"},
+			{"", "tv"},
+		}
+	} else {
+		strategies = []struct {
+			profile string
+			client  string
+		}{
+			{"", ""},
+			{"", "android_vr"},
+			{"", "tv_downgraded"},
+			{"", "mediaconnect"},
+			{"", "tv"},
+		}
 	}
 
 	for _, s := range strategies {
@@ -174,33 +192,28 @@ func GetTranscript(videoID string) (*Transcript, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	languages := []string{"en", "en-US", "en-GB"}
+	args := []string{
+		"--write-auto-sub",
+		"--sub-lang", "en,en-US,en-GB",
+		"--skip-download",
+		"--sub-format", "json3",
+		"-o", tmpDir + "/%(id)s.%(ext)s",
+		"--", videoID,
+	}
 
-	for _, lang := range languages {
-		args := []string{
-			"--write-auto-sub",
-			"--sub-lang", lang,
-			"--skip-download",
-			"--sub-format", "json3",
-			"-o", tmpDir + "/%(id)s.%(ext)s",
-			"--", videoID,
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	_ = cmd.Run()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-		cmd.Run()
-		cancel()
-
-		subtitlePath := fmt.Sprintf("%s/%s.%s.json3", tmpDir, videoID, lang)
-		if data, err := os.ReadFile(subtitlePath); err == nil {
-			return parseJSON3Transcript(videoID, data)
-		}
-
-		baseLang := strings.Split(lang, "-")[0]
-		if baseLang != lang {
-			subtitlePath = fmt.Sprintf("%s/%s.%s.json3", tmpDir, videoID, baseLang)
-			if data, err := os.ReadFile(subtitlePath); err == nil {
-				return parseJSON3Transcript(videoID, data)
+	entries, err := os.ReadDir(tmpDir)
+	if err == nil {
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".json3") {
+				subtitlePath := filepath.Join(tmpDir, entry.Name())
+				if data, err := os.ReadFile(subtitlePath); err == nil {
+					return parseJSON3Transcript(videoID, data)
+				}
 			}
 		}
 	}
@@ -224,11 +237,13 @@ func parseJSON3Transcript(videoID string, data []byte) (*Transcript, error) {
 	}
 
 	var lines []TranscriptLine
+	var sb strings.Builder
 	for _, event := range rawTrans.Events {
-		text := ""
+		sb.Reset()
 		for _, seg := range event.Segs {
-			text += seg.Text
+			sb.WriteString(seg.Text)
 		}
+		text := sb.String()
 		if text != "" {
 			lines = append(lines, TranscriptLine{
 				Text:     strings.TrimSpace(text),
