@@ -13,8 +13,8 @@ const (
 	progressTickInterval = 500 * time.Millisecond
 	syncTimeMinDelta     = 0.5
 	maxHistoryItems      = 100
-	subtitleStartOffset  = 0.3
-	subtitleEndOffset    = 0.1
+	subtitleStartOffset  = 0.8
+	subtitleEndOffset    = 0.3
 	uiOffsetBase         = 15
 	borderPadding        = 4
 	videoItemHeight      = 2

@@ -389,7 +389,7 @@ func (m *Model) getCurrentSubtitle() (string, string) {
 	lo, hi := 0, len(lines)
 	for lo < hi {
 		mid := (lo + hi) / 2
-		if m.currentTime < lines[mid].Start {
+		if m.currentTime < lines[mid].Start-subtitleStartOffset {
 			hi = mid
 		} else {
 			lo = mid + 1
