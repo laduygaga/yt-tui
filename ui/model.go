@@ -76,11 +76,13 @@ type Model struct {
 	cachedWidth         int
 	cachedTitles        []string
 	cachedDesc          []string
-	cachedStyleWidth    int
-	cachedMainBorder    lipgloss.Style
-	cachedPlaylistBorder lipgloss.Style
-	cachedDimStyle      lipgloss.Style
-	cachedCyanStyle     lipgloss.Style
+	cachedStyleWidth        int
+	cachedMainBorder        lipgloss.Style
+	cachedPlaylistBorder    lipgloss.Style
+	cachedDimStyle          lipgloss.Style
+	cachedCyanStyle         lipgloss.Style
+	cachedSubPrimaryStyle   lipgloss.Style
+	cachedSubSecondaryStyle lipgloss.Style
 }
 
 type syncTimeMsg struct {

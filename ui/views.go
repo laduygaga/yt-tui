@@ -37,6 +37,20 @@ var (
 	dimAlignCenterWidth = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("8")).
 				Align(lipgloss.Center)
+
+	subPrimaryColor   = lipgloss.Color("#0f4c81") // Deep Ocean Navy
+	subSecondaryColor = lipgloss.Color("#475569") // Muted Dark Slate
+
+	subPrimaryAlignWidth = lipgloss.NewStyle().
+				Foreground(subPrimaryColor).
+				Align(lipgloss.Center).
+				Bold(true)
+	subSecondaryAlignWidth = lipgloss.NewStyle().
+				Foreground(subSecondaryColor).
+				Align(lipgloss.Center)
+
+	subPrimaryStyle   = lipgloss.NewStyle().Foreground(subPrimaryColor).Bold(true)
+	subSecondaryStyle = lipgloss.NewStyle().Foreground(subSecondaryColor)
 )
 
 func (m *Model) View() string {
@@ -131,6 +145,8 @@ func (m *Model) ensureWidthStyles() {
 	m.cachedPlaylistBorder = playlistBorder.Width(width)
 	m.cachedDimStyle = dimAlignCenterWidth.Width(width)
 	m.cachedCyanStyle = cyanAlignCenterWidth.Width(width)
+	m.cachedSubPrimaryStyle = subPrimaryAlignWidth.Width(width)
+	m.cachedSubSecondaryStyle = subSecondaryAlignWidth.Width(width)
 }
 
 func (m *Model) renderBordered(content string) string {
@@ -215,22 +231,23 @@ func (m *Model) subtitleSection() string {
 		secondaryLang = "VI"
 	}
 
+	primaryLine := ""
 	if primary != "" {
 		if len(primary) > maxLen {
 			primary = primary[:maxLen-3] + "..."
 		}
-		primary = fmt.Sprintf("▼ [%s] %s", primaryLang, primary)
+		primaryLine = fmt.Sprintf("▼ [%s] %s", primaryLang, primary)
 	}
 
 	if secondary != "" {
 		if len(secondary) > maxLen {
 			secondary = secondary[:maxLen-3] + "..."
 		}
-		secondary = fmt.Sprintf("  ↳ [%s] %s", secondaryLang, secondary)
-		return m.cachedCyanStyle.Render(primary + "\n" + secondary)
+		secondaryLine := fmt.Sprintf("  ↳ [%s] %s", secondaryLang, secondary)
+		return m.cachedSubPrimaryStyle.Render(primaryLine) + "\n" + m.cachedSubSecondaryStyle.Render(secondaryLine)
 	}
 
-	return m.cachedCyanStyle.Render(primary)
+	return m.cachedSubPrimaryStyle.Render(primaryLine)
 }
 
 func (m *Model) transcriptView() string {
@@ -278,7 +295,7 @@ func (m *Model) transcriptView() string {
 		if isCurrent {
 			lines = append(lines, selectedStyle.Render("▶ "+primaryStr))
 		} else {
-			lines = append(lines, normalStyle.Render("  "+primaryStr))
+			lines = append(lines, subPrimaryStyle.Render("  "+primaryStr))
 		}
 
 		if line.SecondaryText != "" {
@@ -290,7 +307,7 @@ func (m *Model) transcriptView() string {
 			if isCurrent {
 				lines = append(lines, selectedStyle.Render(secStr))
 			} else {
-				lines = append(lines, secondaryStyle.Render(secStr))
+				lines = append(lines, subSecondaryStyle.Render(secStr))
 			}
 		}
 	}
