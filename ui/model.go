@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -307,6 +308,52 @@ func formatTime(seconds float64) string {
 		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+func formatDuration(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "NA" {
+		return raw
+	}
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return raw
+	}
+	return formatTime(seconds)
+}
+
+func formatViews(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "NA" {
+		return raw
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return raw
+	}
+	negative := n < 0
+	if negative {
+		n = -n
+	}
+	s := strconv.FormatInt(n, 10)
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if len(s) > pre {
+			b.WriteByte(',')
+		}
+	}
+	for i := pre; i < len(s); i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			b.WriteByte(',')
+		}
+	}
+	if negative {
+		return "-" + b.String()
+	}
+	return b.String()
 }
 
 func parseDuration(duration string) float64 {

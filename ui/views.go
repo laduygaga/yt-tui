@@ -277,7 +277,7 @@ func (m *Model) videoListView() string {
 	for i := m.scrollIdx; i < endIdx; i++ {
 		v := m.videos[i]
 		title := truncate(v.Title, m.width-10)
-		desc := fmt.Sprintf("%s | %s", v.Duration, v.Channel)
+		desc := fmt.Sprintf("%s | %s", formatDuration(v.Duration), v.Channel)
 
 		if i == m.selectedIdx {
 			content.WriteString(selectedStyle.Render("▶ " + title))
@@ -314,8 +314,8 @@ func (m *Model) detailsView() string {
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n\n%s\n%s",
 		titleStyle.Render("Title:")+" "+normalStyle.Render(truncate(v.Title, width)),
 		titleStyle.Render("Channel:")+" "+normalStyle.Render(truncate(v.Channel, width)),
-		titleStyle.Render("Duration:")+" "+normalStyle.Render(v.Duration),
-		titleStyle.Render("Views:")+" "+normalStyle.Render(v.Views),
+		titleStyle.Render("Duration:")+" "+normalStyle.Render(formatDuration(v.Duration)),
+		titleStyle.Render("Views:")+" "+normalStyle.Render(formatViews(v.Views)),
 		titleStyle.Render("Uploaded:")+" "+normalStyle.Render(v.Uploaded),
 		titleStyle.Render("Description:"),
 		secondaryStyle.Render(truncate(v.Description, width*3)),
