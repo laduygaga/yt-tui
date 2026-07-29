@@ -194,6 +194,7 @@ func GetTranscript(videoID string) (*Transcript, error) {
 	defer os.RemoveAll(tmpDir)
 
 	args := []string{
+		"--write-sub",
 		"--write-auto-sub",
 		"--sub-lang", "vi,en,en-US,en-GB",
 		"--skip-download",
