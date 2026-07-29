@@ -198,15 +198,32 @@ func (m *Model) subtitleSection() string {
 	if len(m.transcript.Lines) == 0 {
 		return m.cachedDimStyle.Render("[No subtitles available]")
 	}
-	currentSub := m.getCurrentSubtitle()
-	if currentSub == "" {
+	primary, secondary := m.getCurrentSubtitle()
+	if primary == "" && secondary == "" {
 		return " "
 	}
-	subText := "▼ " + currentSub
-	if len(subText) > m.width-10 {
-		subText = subText[:m.width-13] + "..."
+
+	maxLen := m.width - 10
+	if maxLen < 10 {
+		maxLen = 10
 	}
-	return m.cachedCyanStyle.Render(subText)
+
+	if primary != "" {
+		if len(primary) > maxLen {
+			primary = primary[:maxLen-3] + "..."
+		}
+		primary = "▼ " + primary
+	}
+
+	if secondary != "" {
+		if len(secondary) > maxLen {
+			secondary = secondary[:maxLen-3] + "..."
+		}
+		secondary = "  " + secondary
+		return m.cachedCyanStyle.Render(primary + "\n" + secondary)
+	}
+
+	return m.cachedCyanStyle.Render(primary)
 }
 
 func (m *Model) transcriptView() string {
@@ -232,6 +249,9 @@ func (m *Model) transcriptView() string {
 		line := m.transcript.Lines[i]
 		timeStr := formatTime(line.Start)
 		text := line.Text
+		if line.SecondaryText != "" {
+			text = text + " (" + line.SecondaryText + ")"
+		}
 		if len(text) > m.width-15 {
 			text = text[:m.width-18] + "..."
 		}
@@ -361,9 +381,9 @@ func (m *Model) detailsView() string {
 	)
 }
 
-func (m *Model) getCurrentSubtitle() string {
+func (m *Model) getCurrentSubtitle() (string, string) {
 	if m.transcript == nil || len(m.transcript.Lines) == 0 {
-		return ""
+		return "", ""
 	}
 	lines := m.transcript.Lines
 	lo, hi := 0, len(lines)
@@ -377,15 +397,15 @@ func (m *Model) getCurrentSubtitle() string {
 	}
 	idx := lo - 1
 	if idx < 0 {
-		return ""
+		return "", ""
 	}
 	line := lines[idx]
 	startTime := line.Start - subtitleStartOffset
 	endTime := line.Start + line.Duration + subtitleEndOffset
 	if m.currentTime >= startTime && m.currentTime < endTime {
-		return line.Text
+		return line.Text, line.SecondaryText
 	}
-	return ""
+	return "", ""
 }
 
 func (m *Model) playlistsView() string {

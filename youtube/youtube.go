@@ -14,9 +14,10 @@ import (
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 type TranscriptLine struct {
-	Text     string  `json:"text"`
-	Start    float64 `json:"start"`
-	Duration float64 `json:"duration"`
+	Text          string  `json:"text"`
+	SecondaryText string  `json:"secondary_text,omitempty"`
+	Start         float64 `json:"start"`
+	Duration      float64 `json:"duration"`
 }
 
 type Transcript struct {
@@ -194,7 +195,7 @@ func GetTranscript(videoID string) (*Transcript, error) {
 
 	args := []string{
 		"--write-auto-sub",
-		"--sub-lang", "en,en-US,en-GB",
+		"--sub-lang", "vi,en,en-US,en-GB",
 		"--skip-download",
 		"--sub-format", "json3",
 		"-o", tmpDir + "/%(id)s.%(ext)s",
@@ -207,21 +208,93 @@ func GetTranscript(videoID string) (*Transcript, error) {
 	_ = cmd.Run()
 
 	entries, err := os.ReadDir(tmpDir)
-	if err == nil {
-		for _, entry := range entries {
-			if strings.HasSuffix(entry.Name(), ".json3") {
-				subtitlePath := filepath.Join(tmpDir, entry.Name())
-				if data, err := os.ReadFile(subtitlePath); err == nil {
-					return parseJSON3Transcript(videoID, data)
+	if err != nil || len(entries) == 0 {
+		return nil, fmt.Errorf("transcript not available for this video")
+	}
+
+	var viData, enData []byte
+	var lang string
+
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json3") {
+			continue
+		}
+		path := filepath.Join(tmpDir, entry.Name())
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+
+		name := entry.Name()
+		if strings.Contains(name, ".vi.") || strings.HasSuffix(name, ".vi.json3") {
+			viData = data
+		} else if strings.Contains(name, ".en") || strings.HasSuffix(name, ".en.json3") {
+			if enData == nil {
+				enData = data
+			}
+		} else if viData == nil && enData == nil {
+			enData = data
+		}
+	}
+
+	if viData == nil && enData == nil {
+		return nil, fmt.Errorf("transcript not available for this video")
+	}
+
+	var primaryLines, secondaryLines []TranscriptLine
+
+	if viData != nil {
+		primaryLines, _ = parseJSON3Lines(viData)
+		lang = "vi"
+		if enData != nil {
+			secondaryLines, _ = parseJSON3Lines(enData)
+		}
+	} else {
+		primaryLines, _ = parseJSON3Lines(enData)
+		lang = "en"
+	}
+
+	if len(primaryLines) == 0 {
+		if len(secondaryLines) > 0 {
+			primaryLines = secondaryLines
+			secondaryLines = nil
+		} else {
+			return nil, fmt.Errorf("no transcript lines found")
+		}
+	}
+
+	if len(secondaryLines) > 0 {
+		for i := range primaryLines {
+			pStart := primaryLines[i].Start
+
+			bestIdx := -1
+			minDiff := 2.5
+
+			for j, sLine := range secondaryLines {
+				diff := sLine.Start - pStart
+				if diff < 0 {
+					diff = -diff
 				}
+				if diff < minDiff {
+					minDiff = diff
+					bestIdx = j
+				}
+			}
+
+			if bestIdx != -1 {
+				primaryLines[i].SecondaryText = secondaryLines[bestIdx].Text
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("transcript not available for this video")
+	return &Transcript{
+		VideoID: videoID,
+		Lines:   primaryLines,
+		Lang:    lang,
+	}, nil
 }
 
-func parseJSON3Transcript(videoID string, data []byte) (*Transcript, error) {
+func parseJSON3Lines(data []byte) ([]TranscriptLine, error) {
 	var rawTrans struct {
 		Events []struct {
 			TStart int `json:"tStartMs"`
@@ -257,9 +330,5 @@ func parseJSON3Transcript(videoID string, data []byte) (*Transcript, error) {
 		return nil, fmt.Errorf("no transcript lines found")
 	}
 
-	return &Transcript{
-		VideoID: videoID,
-		Lines:   lines,
-		Lang:    "en",
-	}, nil
+	return lines, nil
 }
