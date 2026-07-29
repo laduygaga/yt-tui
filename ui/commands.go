@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"yt-tui/config"
@@ -36,6 +37,8 @@ func (m *Model) searchVideos(query string) tea.Cmd {
 	m.mainSelected = 0
 	m.mainScroll = 0
 	m.videos = []youtube.Video{}
+	m.playAttempt = 0
+	m.playStartTime = time.Time{}
 	return func() tea.Msg {
 		videos, err := youtube.Search(query, m.cfg.MaxResults)
 		return searchResultMsg{videos: videos, err: err}

@@ -11,8 +11,11 @@ import (
 )
 
 const (
-	syncInterval  = 100 * time.Millisecond
-	syncInitDelay = 500 * time.Millisecond
+	syncInterval         = 100 * time.Millisecond
+	syncInitDelay        = 500 * time.Millisecond
+	syncRetryInterval    = 500 * time.Millisecond
+	durationSyncInterval = time.Second
+	ipcTimeout           = 2 * time.Second
 )
 
 type State struct {
@@ -29,14 +32,23 @@ type ProgressUpdate struct {
 	Total   float64
 }
 
+type ipcResponse struct {
+	Data      json.RawMessage `json:"data"`
+	Error     string          `json:"error"`
+	RequestID int64           `json:"request_id"`
+}
+
 type Player struct {
-	socketPath string
-	mu         sync.Mutex
-	state      State
-	cmd        *exec.Cmd
-	conn       net.Conn
-	cancel     chan struct{}
-	onEnded    func()
+	socketPath    string
+	mu            sync.Mutex
+	state         State
+	cmd           *exec.Cmd
+	conn          net.Conn
+	decoder       *json.Decoder
+	nextRequestID int64
+	cancel        chan struct{}
+	onEnded       func()
+	lastError     string
 }
 
 func New(socketPath string) *Player {
@@ -53,9 +65,16 @@ func (p *Player) Start(url string, playerCmd string, onEnded func()) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.cmd != nil && p.cmd.Process != nil {
-		p.cmd.Process.Kill()
-		p.cmd.Wait()
+	p.closeCancelLocked()
+	p.cancel = make(chan struct{})
+	cancel := p.cancel
+	p.closeConnLocked()
+
+	if p.cmd != nil {
+		if p.cmd.Process != nil {
+			p.cmd.Process.Kill()
+		}
+		p.cmd = nil
 	}
 
 	p.state = State{
@@ -68,22 +87,32 @@ func (p *Player) Start(url string, playerCmd string, onEnded func()) error {
 
 	os.Remove(p.socketPath)
 
-	p.cmd = exec.Command(playerCmd, "--no-video", "--quiet", "--ytdl",
+	p.cmd = exec.Command(playerCmd, "--no-video", "--no-input-terminal", "--no-terminal", "--quiet",
 		fmt.Sprintf("--input-ipc-server=%s", p.socketPath), url)
 
 	if err := p.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start player: %w", err)
 	}
 
+	cmd := p.cmd
+	onEndedCb := p.onEnded
 	go func() {
-		p.cmd.Wait()
-		os.Remove(p.socketPath)
-		if p.onEnded != nil {
-			p.onEnded()
+		cmd.Wait()
+
+		p.mu.Lock()
+		isCurrent := p.cmd == cmd
+		if isCurrent {
+			p.closeConnLocked()
+			os.Remove(p.socketPath)
+		}
+		p.mu.Unlock()
+
+		if isCurrent && onEndedCb != nil {
+			onEndedCb()
 		}
 	}()
 
-	go p.syncLoop()
+	go p.syncLoop(cancel)
 
 	return nil
 }
@@ -92,13 +121,10 @@ func (p *Player) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	close(p.cancel)
+	p.closeCancelLocked()
 	p.cancel = make(chan struct{})
 
-	if p.conn != nil {
-		p.conn.Close()
-		p.conn = nil
-	}
+	p.closeConnLocked()
 
 	if p.cmd != nil && p.cmd.Process != nil {
 		p.cmd.Process.Kill()
@@ -201,27 +227,60 @@ func (p *Player) Close() {
 	p.Stop()
 }
 
-func (p *Player) syncLoop() {
-	time.Sleep(syncInitDelay)
+func (p *Player) closeCancelLocked() {
+	if p.cancel == nil {
+		return
+	}
+
+	select {
+	case <-p.cancel:
+	default:
+		close(p.cancel)
+	}
+}
+
+func (p *Player) closeConnLocked() {
+	if p.conn != nil {
+		p.conn.Close()
+		p.conn = nil
+	}
+	p.decoder = nil
+}
+
+func (p *Player) syncLoop(cancel <-chan struct{}) {
+	timer := time.NewTimer(syncInitDelay)
+	defer timer.Stop()
+
+	var lastDurationSync time.Time
 
 	for {
 		select {
-		case <-p.cancel:
+		case <-cancel:
 			return
-		default:
+		case <-timer.C:
 		}
 
 		p.mu.Lock()
 		isPlaying := p.state.IsPlaying
+		totalKnown := p.state.TotalTime > 0
 		p.mu.Unlock()
 
+		nextInterval := syncInterval
+
 		if !isPlaying {
-			time.Sleep(syncInterval)
+			timer.Reset(nextInterval)
 			continue
 		}
 
-		current, total := p.getTimePos()
-		if current >= 0 {
+		fetchDuration := !totalKnown || time.Since(lastDurationSync) >= durationSyncInterval
+		current, total, err := p.getTimePos(fetchDuration)
+		if err != nil {
+			nextInterval = syncRetryInterval
+		} else if current >= 0 {
+			if fetchDuration {
+				lastDurationSync = time.Now()
+			}
+
 			p.mu.Lock()
 			p.state.CurrentTime = current
 			if total > 0 {
@@ -230,89 +289,134 @@ func (p *Player) syncLoop() {
 			p.mu.Unlock()
 		}
 
-		time.Sleep(syncInterval)
+		timer.Reset(nextInterval)
 	}
 }
 
-func (p *Player) getTimePos() (float64, float64) {
-	conn, err := p.getConn()
+func (p *Player) getTimePos(fetchDuration bool) (float64, float64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	current, err := p.getPropertyLocked("time-pos")
 	if err != nil {
-		return -1, 0
+		return -1, 0, err
 	}
 
-	current, err := p.getProperty(conn, "time-pos")
-	if err != nil {
-		return -1, 0
+	if !fetchDuration {
+		return current, 0, nil
 	}
 
-	total, _ := p.getProperty(conn, "duration")
-	return current, total
+	total, _ := p.getPropertyLocked("duration")
+	return current, total, nil
 }
 
 func (p *Player) getConn() (net.Conn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.getConnLocked()
+}
 
+func (p *Player) getConnLocked() (net.Conn, error) {
 	if p.conn != nil {
+		if p.decoder == nil {
+			p.decoder = json.NewDecoder(p.conn)
+		}
 		return p.conn, nil
 	}
 
-	conn, err := net.DialTimeout("unix", p.socketPath, 2*time.Second)
+	conn, err := net.DialTimeout("unix", p.socketPath, ipcTimeout)
 	if err != nil {
 		return nil, err
 	}
 
 	p.conn = conn
+	p.decoder = json.NewDecoder(conn)
 	return conn, nil
 }
 
 func (p *Player) sendCommand(cmd map[string]interface{}) error {
-	conn, err := p.getConn()
-	if err != nil {
-		return err
-	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
-
-	_, err = conn.Write(append(data, '\n'))
+	_, err := p.ipcRequestLocked(cmd)
 	return err
 }
 
-func (p *Player) getProperty(conn net.Conn, name string) (float64, error) {
-	cmd := map[string]interface{}{
+func (p *Player) getProperty(name string) (float64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.getPropertyLocked(name)
+}
+
+func (p *Player) getPropertyLocked(name string) (float64, error) {
+	resp, err := p.ipcRequestLocked(map[string]interface{}{
 		"command": []interface{}{"get_property", name},
+	})
+	if err != nil {
+		return 0, err
 	}
+
+	if len(resp.Data) == 0 || string(resp.Data) == "null" {
+		return 0, fmt.Errorf("mpv property %q unavailable", name)
+	}
+
+	var value float64
+	if err := json.Unmarshal(resp.Data, &value); err != nil {
+		return 0, err
+	}
+
+	return value, nil
+}
+
+func (p *Player) ipcRequestLocked(cmd map[string]interface{}) (ipcResponse, error) {
+	conn, err := p.getConnLocked()
+	if err != nil {
+		return ipcResponse{}, err
+	}
+
+	p.nextRequestID++
+	requestID := p.nextRequestID
+	cmd["request_id"] = requestID
 
 	data, err := json.Marshal(cmd)
 	if err != nil {
-		return 0, err
+		return ipcResponse{}, err
 	}
 
-	_, err = conn.Write(append(data, '\n'))
-	if err != nil {
-		p.mu.Lock()
-		p.conn = nil
-		p.mu.Unlock()
-		conn.Close()
-		return 0, err
+	if err := conn.SetDeadline(time.Now().Add(ipcTimeout)); err != nil {
+		p.closeConnLocked()
+		return ipcResponse{}, err
 	}
 
-	var resp struct {
-		Data  float64 `json:"data"`
-		Error string  `json:"error"`
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		p.closeConnLocked()
+		return ipcResponse{}, err
 	}
 
-	decoder := json.NewDecoder(conn)
-	if err := decoder.Decode(&resp); err != nil {
-		return 0, err
+	maxReads := 64
+	for i := 0; i < maxReads; i++ {
+		var resp ipcResponse
+		if err := p.decoder.Decode(&resp); err != nil {
+			p.closeConnLocked()
+			return ipcResponse{}, err
+		}
+
+		if resp.RequestID != requestID {
+			continue
+		}
+
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			p.closeConnLocked()
+			return ipcResponse{}, err
+		}
+
+		if resp.Error != "success" {
+			return resp, fmt.Errorf("mpv error: %s", resp.Error)
+		}
+
+		return resp, nil
 	}
 
-	if resp.Error != "success" {
-		return 0, fmt.Errorf("mpv error: %s", resp.Error)
-	}
-
-	return resp.Data, nil
+	p.closeConnLocked()
+	return ipcResponse{}, fmt.Errorf("ipc: too many unsolicited responses")
 }

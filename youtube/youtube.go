@@ -38,15 +38,21 @@ type Video struct {
 }
 
 func Search(query string, maxResults int) ([]Video, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	delim := "＜｜＞"
+	recDelim := "＜ＲＥＣ＞"
 	args := []string{
 		"--no-check-certificate",
 		"--flat-playlist",
 		"--user-agent", userAgent,
-		"--print", "%(id)s|%(title)s|%(channel)s|%(duration)s|%(view_count)s|%(upload_date)s|%(thumbnail)s|%(description)s|%(url)s",
+		"--print", fmt.Sprintf("%%(id)s%s%%(title)s%s%%(channel)s%s%%(duration)s%s%%(view_count)s%s%%(upload_date)s%s%%(thumbnail)s%s%%(description)s%s%%(url)s%s",
+			delim, delim, delim, delim, delim, delim, delim, delim, recDelim),
 		"--", fmt.Sprintf("ytsearch%d:%s", maxResults, query),
 	}
 
-	cmd := exec.Command("yt-dlp", args...)
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	output, err := cmd.Output()
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
@@ -56,23 +62,41 @@ func Search(query string, maxResults int) ([]Video, error) {
 	}
 
 	var videos []Video
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	for _, line := range lines {
-		if line == "" {
+	records := strings.Split(string(output), recDelim)
+	for _, rec := range records {
+		rec = strings.TrimSpace(rec)
+		if rec == "" {
 			continue
 		}
-		parts := strings.Split(line, "|")
+		parts := strings.Split(rec, delim)
 		if len(parts) >= 9 {
+			id := parts[0]
+			title := parts[1]
+			duration := parts[3]
+			url := parts[8]
+
+			if id == "" || id == "NA" || len(id) != 11 {
+				continue
+			}
+			if duration == "" || duration == "NA" || duration == "0:00" {
+				if duration == "NA" {
+					continue
+				}
+			}
+			if !strings.Contains(url, "watch?v=") {
+				continue
+			}
+
 			videos = append(videos, Video{
-				ID:          parts[0],
-				Title:       parts[1],
+				ID:          id,
+				Title:       title,
 				Channel:     parts[2],
-				Duration:    parts[3],
+				Duration:    duration,
 				Views:       parts[4],
 				Uploaded:    parts[5],
 				Thumbnail:   parts[6],
 				Description: parts[7],
-				URL:         parts[8],
+				URL:         url,
 			})
 		}
 	}
@@ -81,66 +105,63 @@ func Search(query string, maxResults int) ([]Video, error) {
 }
 
 func GetStreamURL(videoURL string, chromeProfile string) (string, error) {
-	args := []string{
-		"--no-check-certificate",
-		"--no-warnings",
-		"--no-playlist",
-		"-f", "bestaudio/best",
-		"--print", "%(url)s",
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
 
-	if chromeProfile != "" {
-		args = append(args, "--cookies-from-browser", fmt.Sprintf("chrome:%s", chromeProfile))
-	}
-
-	args = append(args, "--", videoURL)
-
-	cmd := exec.Command("yt-dlp", args...)
-	output, err := cmd.Output()
-	if err == nil {
-		url := strings.TrimSpace(string(output))
-		if url != "" {
-			return url, nil
-		}
-	}
-
-	configs := []struct {
-		client string
-		skip   string
-	}{
-		{"android_vr", "webpage,consent"},
-		{"mediaconnect", "webpage,consent"},
-		{"tv", "webpage,consent"},
-	}
-
-	for _, cfg := range configs {
+	tryExtract := func(profile, client string) (string, error) {
 		args := []string{
 			"--no-check-certificate",
 			"--no-warnings",
 			"--no-playlist",
 			"-f", "bestaudio/best",
 			"--print", "%(url)s",
-			"--extractor-args", fmt.Sprintf("youtube:player_client=%s;player_skip=%s", cfg.client, cfg.skip),
-			"--", videoURL,
 		}
+		if client != "" {
+			args = append(args, "--extractor-args", fmt.Sprintf("youtube:player_client=%s", client))
+		}
+		if profile != "" {
+			args = append(args, "--cookies-from-browser", fmt.Sprintf("chrome:%s", profile))
+		}
+		args = append(args, "--", videoURL)
 
-		cmd := exec.Command("yt-dlp", args...)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer attemptCancel()
+
+		cmd := exec.CommandContext(attemptCtx, "yt-dlp", args...)
 		output, err := cmd.Output()
-		if err == nil {
-			url := strings.TrimSpace(string(output))
-			if url != "" {
-				return url, nil
-			}
+		if err != nil {
+			return "", fmt.Errorf("yt-dlp error: %w", err)
 		}
-
-		if exitError, ok := err.(*exec.ExitError); ok {
-			if cfg.client == configs[len(configs)-1].client {
-				return "", fmt.Errorf("yt-dlp error: %s", string(exitError.Stderr))
-			}
-			continue
+		url := strings.TrimSpace(string(output))
+		if url == "" {
+			return "", fmt.Errorf("empty stream URL")
 		}
+		return url, nil
+	}
 
-		return "", fmt.Errorf("yt-dlp error: %w", err)
+	strategies := []struct {
+		profile string
+		client  string
+	}{
+		{"", ""},
+		{"", "android_vr"},
+		{"", "tv_downgraded"},
+		{"", "mediaconnect"},
+		{"", "tv"},
+		{chromeProfile, ""},
+		{chromeProfile, "tv_downgraded"},
+		{chromeProfile, "android_vr"},
+		{chromeProfile, "mediaconnect"},
+		{chromeProfile, "tv"},
+	}
+
+	for _, s := range strategies {
+		if url, err := tryExtract(s.profile, s.client); err == nil && url != "" {
+			return url, nil
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("yt-dlp timeout")
+		}
 	}
 
 	return "", fmt.Errorf("yt-dlp error: all methods failed")

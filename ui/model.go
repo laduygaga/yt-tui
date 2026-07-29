@@ -65,6 +65,8 @@ type Model struct {
 	playbackSpeed       float64
 	isLooping           bool
 	confirmQuit         bool
+	playStartTime       time.Time
+	playAttempt         int
 }
 
 type syncTimeMsg struct {
@@ -73,11 +75,15 @@ type syncTimeMsg struct {
 }
 type clearStatusMsg struct{}
 type songEndedMsg struct{}
+type playbackErrorMsg struct {
+	video   youtube.Video
+	attempt int
+}
 
 func (m *Model) tickProgress() tea.Cmd {
-	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(progressTickInterval, func(t time.Time) tea.Msg {
 		if !m.player.IsPlaying() {
-			return nil
+			return syncTimeMsg{}
 		}
 		state := m.player.GetState()
 		return syncTimeMsg{
@@ -118,21 +124,21 @@ func (m *Model) Init() tea.Cmd {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case syncTimeMsg:
+		if m.shouldApplySyncTime(msg) {
+			m.applySyncTime(msg)
+		}
+		return m, m.tickProgress()
+	case progress.FrameMsg:
+		progressModel, cmd := m.progress.Update(msg)
+		m.progress = progressModel.(progress.Model)
+		return m, cmd
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-	case syncTimeMsg:
-		m.currentTime = msg.Current
-		if msg.Total > 0 {
-			m.totalTime = msg.Total
-		}
-		if m.currentTime > m.totalTime {
-			m.currentTime = m.totalTime
-		}
-		return m, m.tickProgress()
 	case clearStatusMsg:
 		m.statusMsg = ""
 		m.confirmQuit = false
@@ -162,6 +168,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.nowPlaying = msg.video.Title
 		m.isPaused = false
+		if m.playStartTime.IsZero() {
+			m.playStartTime = time.Now()
+		}
 		if msg.url != "" {
 			msg.video.URL = msg.url
 			m.store.AddToHistory(msg.video)
@@ -186,6 +195,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case songEndedMsg:
+		quickFail := !m.playStartTime.IsZero() && time.Since(m.playStartTime) < 5*time.Second && m.currentTime < 2
+
 		if !m.player.IsLooping() && (m.view == "playlist" || m.view == "history") && len(m.videos) > 0 {
 			nextIdx := m.selectedIdx + 1
 			if nextIdx < len(m.videos) {
@@ -197,16 +208,63 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.playVideo(video)
 			}
 		}
-		if m.currentTime > 1 {
-			m.player.Stop()
+
+		m.player.Stop()
+		if m.nowPlaying != "" {
+			if quickFail && m.playAttempt < 3 {
+				m.playAttempt++
+				m.playStartTime = time.Time{}
+				if m.selectedIdx < len(m.videos) {
+					video := m.videos[m.selectedIdx]
+					m.loading = true
+					m.loadingText = "Retrying playback..."
+					return m, m.playVideo(video)
+				}
+			}
+			m.statusMsg = "Playback ended"
+			m.playAttempt = 0
+			m.playStartTime = time.Time{}
+			return m, tea.Tick(statusTimeoutShort, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
 		}
+		m.playAttempt = 0
+		m.playStartTime = time.Time{}
 		return m, nil
-	case progress.FrameMsg:
-		progressModel, cmd := m.progress.Update(msg)
-		m.progress = progressModel.(progress.Model)
-		return m, cmd
 	}
 	return m, nil
+}
+
+func (m *Model) shouldApplySyncTime(msg syncTimeMsg) bool {
+	current := msg.Current
+	if msg.Total > 0 && current > msg.Total {
+		current = msg.Total
+	}
+
+	if msg.Total > 0 && (m.totalTime <= 0 || hasSignificantTimeDelta(msg.Total, m.totalTime)) {
+		return true
+	}
+	if m.totalTime > 0 && current >= m.totalTime && m.currentTime < m.totalTime {
+		return true
+	}
+	return hasSignificantTimeDelta(current, m.currentTime)
+}
+
+func (m *Model) applySyncTime(msg syncTimeMsg) {
+	m.currentTime = msg.Current
+	if msg.Total > 0 {
+		m.totalTime = msg.Total
+	}
+	if m.totalTime > 0 && m.currentTime > m.totalTime {
+		m.currentTime = m.totalTime
+	}
+}
+
+func hasSignificantTimeDelta(a, b float64) bool {
+	if a > b {
+		return a-b >= syncTimeMinDelta
+	}
+	return b-a >= syncTimeMinDelta
 }
 
 func (m *Model) fixScroll() {
@@ -289,11 +347,17 @@ func (m *Model) startPlayer(url, title string) tea.Cmd {
 	m.playbackSpeed = defaultSpeed
 	m.isLooping = false
 
-	m.player.Start(url, m.cfg.Player, func() {
+	err := m.player.Start(url, m.cfg.Player, func() {
 		if m.program != nil && !m.player.IsLooping() {
 			m.program.Send(songEndedMsg{})
 		}
 	})
+
+	if err != nil {
+		return func() tea.Msg {
+			return playResultMsg{err: err}
+		}
+	}
 
 	return nil
 }

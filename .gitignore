@@ -1,3 +1,4 @@
 yt-tui
 *.exe
 *.log
+.omo/

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -66,9 +67,11 @@ func (m *Model) View() string {
 
 	var statusBar string
 	isPlayerActive := m.player.IsPlaying()
-	if isPlayerActive && m.nowPlaying != "" {
+	if (isPlayerActive || m.totalTime > 0) && m.nowPlaying != "" {
 		status := "▶ Playing: "
-		if m.player.IsPaused() {
+		if !isPlayerActive && m.totalTime > 0 {
+			status = "■ Stopped: "
+		} else if m.player.IsPaused() {
 			status = "⏸ Paused: "
 		}
 		if m.player.IsLooping() {
@@ -78,6 +81,9 @@ func (m *Model) View() string {
 		var progressStr string
 		if m.totalTime > 0 {
 			pct := m.currentTime / m.totalTime
+			if pct > 1 {
+				pct = 1
+			}
 			m.progress.Width = m.width - 20
 			if m.progress.Width < 20 {
 				m.progress.Width = 20
@@ -248,7 +254,7 @@ func (m *Model) videoListView() string {
 		return normalStyle.Render("No videos in current list")
 	}
 
-	var lines []string
+	var content strings.Builder
 
 	offset := uiOffsetBase
 	if m.height < offset+2 {
@@ -274,19 +280,24 @@ func (m *Model) videoListView() string {
 		desc := fmt.Sprintf("%s | %s", v.Duration, v.Channel)
 
 		if i == m.selectedIdx {
-			lines = append(lines, selectedStyle.Render("▶ "+title))
-			lines = append(lines, selectedStyle.Render("  "+desc))
+			content.WriteString(selectedStyle.Render("▶ " + title))
+			content.WriteByte('\n')
+			content.WriteString(selectedStyle.Render("  " + desc))
 		} else {
-			lines = append(lines, normalStyle.Render("  "+title))
-			lines = append(lines, secondaryStyle.Render("  "+desc))
+			content.WriteString(normalStyle.Render("  " + title))
+			content.WriteByte('\n')
+			content.WriteString(secondaryStyle.Render("  " + desc))
+		}
+		if i < endIdx-1 {
+			content.WriteByte('\n')
 		}
 	}
 
-	if len(lines) == 0 {
+	if content.Len() == 0 {
 		return normalStyle.Render("No videos to display")
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+	return content.String()
 }
 
 func (m *Model) detailsView() string {
